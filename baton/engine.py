@@ -223,6 +223,15 @@ class Supervisor:
                 self._finish_task = asyncio.create_task(self._finish(report, worker))
                 return
 
+            if (
+                report.state == LifecycleState.running
+                and self._state.phase == ProjectPhase.blocked
+            ):
+                self._commit(
+                    self._state.updated(phase=ProjectPhase.running, last_report=report)
+                )
+                return
+
             self._commit(self._state.updated(last_report=report))
 
     def snapshot(self) -> ProjectState:

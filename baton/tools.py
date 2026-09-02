@@ -128,8 +128,9 @@ class BatonTools:
         - ``failed``: you could not complete the task. Say what went wrong.
         - ``blocked``: you need a human's input. You stay alive for that human
           and report again once the work can move.
-        - ``running``: you are still working. It is for reconciliation only:
-          baton records it as the last report and moves no phase.
+        - ``running``: you are still working. It is for reconciliation:
+          baton records it as the last report and moves no phase, except
+          from ``blocked``, which it returns to ``running``.
 
         The payload rules, in the order baton checks them. The message rule is
         checked first, so a report that breaks both is refused for the message

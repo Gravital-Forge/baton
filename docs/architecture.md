@@ -37,7 +37,7 @@ on: prose in a worker's output is never a signal.
 - **`failed`** — the task could not be done.
 - **`blocked`** — a human's input is needed.
 - **`running`** — still working. It exists for reconciliation. Baton records it as the last report
-  and moves no phase.
+  and moves no phase, except while the project is `blocked` (see "The normal loop").
 
 Baton checks a report's payload against two rules, in this order, so a report that breaks both is
 refused for the message alone:
@@ -81,6 +81,10 @@ with the prompt the last one wrote — a `launch` event, and a `phase` event bac
 `completed` report stops the project in phase `completed`. A `failed` report stops the project in
 phase `failed`. A `blocked` report skips termination: it moves the project to phase `blocked` and
 leaves the worker alive for the human who must unblock it.
+
+A `running` report makes one transition, and only this one. While the project is `blocked`, it
+returns the project to phase `running` — a `phase` event from `blocked` to `running` — and leaves
+the worker alive. In every other phase baton records the report and moves nothing.
 
 ## The tmux layout
 

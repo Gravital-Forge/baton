@@ -48,7 +48,8 @@ enough task-specific detail that its next action is unambiguous.
 
 When baton restarts, it asks you for your current state. Answer at once, through
 `report_lifecycle`, and report the state you are truly in. Use `running` when you
-are still working on the task: it tells baton nothing has to change.
+are still working on the task: it tells baton nothing has to change. From
+`blocked`, it returns the project to `running`.
 
 ## Baton's tools
 

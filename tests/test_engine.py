@@ -3,6 +3,7 @@
 import logging
 import re
 import signal
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,10 +22,13 @@ from baton.models import (
 )
 from baton.state import StateStore
 from baton.tmux import PaneInfo, TmuxError
+from tests.doubles import FakeLauncher, FakeTmux
 
 
 @pytest.fixture
-def supervisor(config: BatonConfig, store: StateStore, tmux, launcher) -> Supervisor:
+def supervisor(
+    config: BatonConfig, store: StateStore, tmux: FakeTmux, launcher: FakeLauncher
+) -> Supervisor:
     """Build a `Supervisor` wired to the default fake tmux and launcher.
 
     Args:
@@ -58,8 +62,8 @@ def _persisted_and_live(
 def test_supervisor_loads_persisted_state_at_construction(
     config: BatonConfig,
     store: StateStore,
-    tmux,
-    launcher,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
     tmp_path: Path,
 ) -> None:
     """The supervisor loads the persisted ProjectState at construction."""
@@ -84,7 +88,7 @@ def test_supervisor_loads_persisted_state_at_construction(
 
 
 def test_recent_events_returns_the_stores_events_newest_last(
-    config: BatonConfig, store: StateStore, tmux, launcher
+    config: BatonConfig, store: StateStore, tmux: FakeTmux, launcher: FakeLauncher
 ) -> None:
     """recent_events returns the store's events, oldest first, newest last."""
     store.append_event(EventKind.milestone, "worker-1", {"message": "first"})
@@ -99,8 +103,8 @@ def test_recent_events_returns_the_stores_events_newest_last(
 @pytest.mark.anyio
 async def test_initialize_launches_the_first_worker_and_records_phase_running(
     config: BatonConfig,
-    tmux,
-    launcher,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
     supervisor: Supervisor,
     project_dir: Path,
 ) -> None:
@@ -167,7 +171,11 @@ async def test_initialize_with_explicit_session_name_overrides_the_default(
 
 @pytest.mark.anyio
 async def test_initialize_does_not_create_an_already_existing_session(
-    config: BatonConfig, store: StateStore, make_tmux, launcher, project_dir: Path
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
 ) -> None:
     """An existing tmux session is not created again."""
     tmux = make_tmux(sessions=["baton-project"])
@@ -248,7 +256,7 @@ async def test_initialize_is_refused_for_a_path_that_is_not_a_directory(
 @pytest.mark.parametrize("initial_prompt", ["", "  \n\t "])
 async def test_initialize_is_refused_for_a_blank_initial_prompt(
     config: BatonConfig,
-    launcher,
+    launcher: FakeLauncher,
     supervisor: Supervisor,
     project_dir: Path,
     initial_prompt: str,
@@ -268,7 +276,7 @@ async def test_initialize_is_refused_for_a_blank_initial_prompt(
 @pytest.mark.parametrize("session_name", ["", "  \n\t "])
 async def test_initialize_is_refused_for_a_blank_session_name(
     config: BatonConfig,
-    launcher,
+    launcher: FakeLauncher,
     supervisor: Supervisor,
     project_dir: Path,
     session_name: str,
@@ -290,8 +298,8 @@ async def test_initialize_is_refused_for_a_blank_session_name(
 async def test_initialize_after_completed_starts_a_new_project(
     config: BatonConfig,
     store: StateStore,
-    tmux,
-    launcher,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
     project_dir: Path,
     tmp_path: Path,
 ) -> None:
@@ -315,7 +323,11 @@ async def test_initialize_after_completed_starts_a_new_project(
 
 @pytest.mark.anyio
 async def test_tmux_error_from_create_session_propagates_and_leaves_no_state(
-    config: BatonConfig, store: StateStore, make_tmux, launcher, project_dir: Path
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
 ) -> None:
     """A TmuxError from create_session propagates, leaving no state.json."""
     tmux = make_tmux(create_error=TmuxError("boom"))
@@ -331,7 +343,11 @@ async def test_tmux_error_from_create_session_propagates_and_leaves_no_state(
 
 @pytest.mark.anyio
 async def test_tmux_error_from_launch_propagates_and_leaves_no_state(
-    config: BatonConfig, store: StateStore, tmux, make_launcher, project_dir: Path
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    make_launcher: Callable[..., FakeLauncher],
+    project_dir: Path,
 ) -> None:
     """A TmuxError from the launcher's launch propagates, leaving no state.json."""
     launcher = make_launcher(launch_errors=[TmuxError("no claude")])
@@ -414,7 +430,7 @@ async def test_running_report_updates_last_report_without_a_phase_transition(
 
 @pytest.mark.anyio
 async def test_blocked_report_sets_phase_blocked_and_keeps_the_worker(
-    config: BatonConfig, supervisor: Supervisor, tmux, project_dir: Path
+    config: BatonConfig, supervisor: Supervisor, tmux: FakeTmux, project_dir: Path
 ) -> None:
     """A blocked report sets phase blocked, keeps the worker, signals nothing."""
     result = await supervisor.initialize(project_dir, "start here")
@@ -432,6 +448,41 @@ async def test_blocked_report_sets_phase_blocked_and_keeps_the_worker(
         assert state.worker == result.worker
         assert state.last_report == expected_report
     assert tmux.signals == []
+
+
+@pytest.mark.anyio
+async def test_blocked_worker_reporting_running_commits_phase_back_to_running(
+    config: BatonConfig, supervisor: Supervisor, project_dir: Path
+) -> None:
+    """A running report from a blocked project commits the phase back to running."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.blocked, message="waiting on input"
+    )
+
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.running, message="unblocked"
+    )
+    await supervisor.wait_for_finish()
+
+    expected_report = LifecycleReport(state=LifecycleState.running, message="unblocked")
+    for state in _persisted_and_live(config, supervisor):
+        assert state.phase == ProjectPhase.running
+        assert state.worker == result.worker
+        assert state.last_report == expected_report
+
+    events = supervisor.recent_events(count=20)
+    assert [event.kind for event in events] == [
+        EventKind.launch,
+        EventKind.phase,
+        EventKind.lifecycle,
+        EventKind.phase,
+        EventKind.lifecycle,
+        EventKind.phase,
+    ]
+    phase_event = events[-1]
+    assert phase_event.payload["from"] == ProjectPhase.blocked.value
+    assert phase_event.payload["to"] == ProjectPhase.running.value
 
 
 @pytest.mark.anyio
@@ -460,7 +511,7 @@ async def test_blocked_worker_can_later_report_success_like_any_worker(
 
 @pytest.mark.anyio
 async def test_report_lifecycle_returns_before_the_finish_runs(
-    supervisor: Supervisor, tmux, project_dir: Path
+    supervisor: Supervisor, tmux: FakeTmux, project_dir: Path
 ) -> None:
     """report_lifecycle returns while the finish is still pending."""
     result = await supervisor.initialize(project_dir, "start here")
@@ -481,7 +532,7 @@ async def test_report_lifecycle_returns_before_the_finish_runs(
 async def test_success_report_terminates_and_launches_the_next_worker(
     config: BatonConfig,
     supervisor: Supervisor,
-    launcher,
+    launcher: FakeLauncher,
     project_dir: Path,
 ) -> None:
     """A success report launches the next worker with the report's next prompt."""
@@ -543,7 +594,7 @@ async def test_success_report_produces_the_full_event_sequence_in_order(
 async def test_completed_report_terminates_and_stops_with_no_worker(
     config: BatonConfig,
     supervisor: Supervisor,
-    launcher,
+    launcher: FakeLauncher,
     project_dir: Path,
 ) -> None:
     """A completed report terminates the worker and stops in phase completed."""
@@ -564,8 +615,8 @@ async def test_completed_report_terminates_and_stops_with_no_worker(
 async def test_failed_report_terminates_and_stops_with_no_worker(
     config: BatonConfig,
     supervisor: Supervisor,
-    tmux,
-    launcher,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
     project_dir: Path,
 ) -> None:
     """A failed report terminates the worker and stops in phase failed."""
@@ -586,7 +637,11 @@ async def test_failed_report_terminates_and_stops_with_no_worker(
 
 @pytest.mark.anyio
 async def test_a_failed_relaunch_stops_in_failed_rather_than_stranding_the_project(
-    config: BatonConfig, store: StateStore, tmux, make_launcher, project_dir: Path
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    make_launcher: Callable[..., FakeLauncher],
+    project_dir: Path,
 ) -> None:
     """A launch that fails during the finish stops in failed, not in terminating."""
     launcher = make_launcher(launch_errors=[None, TmuxError("session gone")])
@@ -617,8 +672,8 @@ async def test_a_failed_relaunch_stops_in_failed_rather_than_stranding_the_proje
 async def test_a_failed_handoff_is_logged_when_it_happens(
     config: BatonConfig,
     store: StateStore,
-    tmux,
-    make_launcher,
+    tmux: FakeTmux,
+    make_launcher: Callable[..., FakeLauncher],
     project_dir: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -702,7 +757,7 @@ async def test_payload_violation_surfaces_as_supervisor_error(
 
 @pytest.mark.anyio
 async def test_terminating_an_already_dead_pane_signals_nothing(
-    supervisor: Supervisor, tmux, project_dir: Path
+    supervisor: Supervisor, tmux: FakeTmux, project_dir: Path
 ) -> None:
     """A pane already dead is not signalled, even when a pid was recorded."""
     result = await supervisor.initialize(project_dir, "start here")
@@ -724,7 +779,11 @@ async def test_terminating_an_already_dead_pane_signals_nothing(
 
 @pytest.mark.anyio
 async def test_terminating_a_live_pane_prefers_the_panes_own_pid(
-    config: BatonConfig, store: StateStore, make_tmux, launcher, project_dir: Path
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
 ) -> None:
     """The live pane's pid outranks the one recorded at launch."""
     tmux = make_tmux(
@@ -744,7 +803,11 @@ async def test_terminating_a_live_pane_prefers_the_panes_own_pid(
 
 @pytest.mark.anyio
 async def test_terminating_falls_back_to_the_recorded_pid(
-    config: BatonConfig, store: StateStore, make_tmux, launcher, project_dir: Path
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
 ) -> None:
     """A live pane that reports no pid falls back to the recorded one."""
     tmux = make_tmux(
@@ -769,7 +832,11 @@ async def test_terminating_falls_back_to_the_recorded_pid(
 
 @pytest.mark.anyio
 async def test_terminating_a_live_pane_sends_sigterm_then_sigkill(
-    config: BatonConfig, store: StateStore, make_tmux, launcher, project_dir: Path
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
 ) -> None:
     """A pane that stays alive after SIGTERM is escalated to SIGKILL."""
     tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=4242)])
@@ -795,7 +862,11 @@ async def test_terminating_a_live_pane_sends_sigterm_then_sigkill(
 
 @pytest.mark.anyio
 async def test_process_lookup_error_from_signal_pane_does_not_stop_the_finish(
-    config: BatonConfig, store: StateStore, make_tmux, launcher, project_dir: Path
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
 ) -> None:
     """A ProcessLookupError from signal_pane is swallowed; the finish completes."""
     tmux = make_tmux(
@@ -821,7 +892,11 @@ async def test_process_lookup_error_from_signal_pane_does_not_stop_the_finish(
 
 @pytest.mark.anyio
 async def test_termination_polls_until_the_pane_dies_before_escalating(
-    config: BatonConfig, store: StateStore, make_tmux, launcher, project_dir: Path
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
 ) -> None:
     """A pane that dies while being polled is never escalated to SIGKILL."""
     patient = replace(config, termination_timeout=5)
@@ -846,7 +921,11 @@ async def test_termination_polls_until_the_pane_dies_before_escalating(
 
 @pytest.mark.anyio
 async def test_a_pane_that_exits_just_before_sigkill_is_not_an_error(
-    config: BatonConfig, store: StateStore, make_tmux, launcher, project_dir: Path
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
 ) -> None:
     """A worker that exits between the last poll and SIGKILL is not an error."""
     tmux = make_tmux(
@@ -867,7 +946,11 @@ async def test_a_pane_that_exits_just_before_sigkill_is_not_an_error(
 
 @pytest.mark.anyio
 async def test_termination_signals_nothing_when_no_pid_is_known(
-    config: BatonConfig, store: StateStore, make_tmux, make_launcher, project_dir: Path
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    make_launcher: Callable[..., FakeLauncher],
+    project_dir: Path,
 ) -> None:
     """A live pane with no pid, and no recorded pid, is not signalled."""
     tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=None)])
