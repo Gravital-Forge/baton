@@ -23,6 +23,43 @@ _LAUNCH_SCRIPT_TEMPLATE = (
 )
 
 
+def _mcp_config_path(config: BatonConfig) -> Path:
+    """Return the MCP config path inside a configuration's state directory.
+
+    Args:
+        config: The configuration naming the state directory.
+
+    Returns:
+        The `mcp.json` path every worker's launch script points at.
+    """
+    return config.state_dir / "mcp.json"
+
+
+def write_mcp_config(config: BatonConfig) -> Path:
+    """Write the shared MCP config every worker's launch script points at.
+
+    The daemon writes it at startup, so an operator can point a Claude Code
+    session at baton before any project exists, and `Supervisor.initialize`
+    writes it again at every project start, so an address changed between
+    runs still reaches a worker.
+
+    Args:
+        config: The configuration naming the address to publish and the
+            directory to publish it in.
+
+    Returns:
+        The path the config was written to.
+    """
+    config.state_dir.mkdir(parents=True, exist_ok=True)
+    mcp_config_path = _mcp_config_path(config)
+    url = f"http://{config.host}:{config.port}/sse"
+    client_config = {"mcpServers": {"baton": {"type": "sse", "url": url}}}
+    mcp_config_path.write_text(
+        json.dumps(client_config, indent=2) + "\n", encoding="utf-8"
+    )
+    return mcp_config_path
+
+
 class WorkerLauncher:
     """Launches Claude Code workers and writes the files a launch needs."""
 
@@ -35,11 +72,6 @@ class WorkerLauncher:
         """
         self._config = config
         self._tmux = tmux
-
-    @property
-    def _mcp_config_path(self) -> Path:
-        """The shared MCP config file every worker's launch script points at."""
-        return self._config.state_dir / "mcp.json"
 
     def launch(self, project_path: Path, pane_target: str, prompt: str) -> WorkerRecord:
         """Launch a worker into the given pane and return its record.
@@ -59,9 +91,7 @@ class WorkerLauncher:
         prompt_path = worker_dir / "prompt.md"
         prompt_path.write_text(prompt, encoding="utf-8")
 
-        mcp_config_path = self._mcp_config_path
-        if not mcp_config_path.exists():
-            self.write_mcp_config()
+        mcp_config_path = _mcp_config_path(self._config)
 
         launch_path = worker_dir / "launch.sh"
         launch_path.write_text(
@@ -113,18 +143,3 @@ class WorkerLauncher:
         skill_path = skill_dir / "SKILL.md"
         skill_path.write_text(skill_text, encoding="utf-8")
         return skill_path
-
-    def write_mcp_config(self) -> Path:
-        """Write the shared MCP config every worker's launch script points at.
-
-        Returns:
-            The path the config was written to.
-        """
-        self._config.state_dir.mkdir(parents=True, exist_ok=True)
-        mcp_config_path = self._mcp_config_path
-        url = f"http://{self._config.host}:{self._config.port}/sse"
-        config = {"mcpServers": {"baton": {"type": "sse", "url": url}}}
-        mcp_config_path.write_text(
-            json.dumps(config, indent=2) + "\n", encoding="utf-8"
-        )
-        return mcp_config_path

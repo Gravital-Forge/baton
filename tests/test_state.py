@@ -29,19 +29,6 @@ GOOD_STATE_JSON = {
 
 
 @pytest.fixture
-def store(tmp_path: Path) -> StateStore:
-    """Build a StateStore rooted under a state directory that does not exist.
-
-    Args:
-        tmp_path: Pytest's per-test temporary directory.
-
-    Returns:
-        A StateStore whose state_dir has not been created on disk.
-    """
-    return StateStore(tmp_path / "state")
-
-
-@pytest.fixture
 def populated_state(tmp_path: Path) -> ProjectState:
     """Build a fully populated ProjectState for round-trip tests.
 

@@ -1,7 +1,5 @@
 """Tests for baton.prompts: the worker preamble and the packaged skill file."""
 
-from importlib import resources
-
 import pytest
 
 from baton.prompts import WORKER_PREAMBLE
@@ -35,16 +33,6 @@ def _skill_frontmatter_name(text: str) -> str:
         if line.startswith("name:"):
             return line.removeprefix("name:").strip()
     raise ValueError("frontmatter has no name: line")
-
-
-@pytest.fixture
-def skill_text() -> str:
-    """Load the packaged worker skill file the way baton loads it at runtime."""
-    return (
-        resources.files("baton")
-        .joinpath("skill", "SKILL.md")
-        .read_text(encoding="utf-8")
-    )
 
 
 def test_preamble_names_the_skill_file() -> None:

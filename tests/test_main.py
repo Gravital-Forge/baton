@@ -1,5 +1,6 @@
 """Tests for baton.__main__."""
 
+import json
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,22 @@ def test_main_runs_the_server_over_sse_with_the_configured_host_and_port(
     assert fake_server.run_calls == [
         {"transport": "sse", "host": "127.0.0.1", "port": 9999}
     ]
+
+
+def test_main_writes_the_mcp_client_config_into_the_state_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """main() writes mcp.json before running, so a session can be pointed at it."""
+    _set_baton_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(main_module, "build_supervisor", lambda config: object())
+    monkeypatch.setattr(main_module, "build_server", lambda supervisor: _FakeServer())
+
+    main_module.main()
+
+    written = json.loads((tmp_path / "mcp.json").read_text(encoding="utf-8"))
+    assert written == {
+        "mcpServers": {"baton": {"type": "sse", "url": "http://127.0.0.1:9999/sse"}}
+    }
 
 
 def test_main_wires_the_built_config_and_supervisor_through(

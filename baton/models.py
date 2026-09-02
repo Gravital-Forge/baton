@@ -11,7 +11,8 @@ from typing import Self
 class LifecycleState(StrEnum):
     """The lifecycle state a worker reports through an MCP call.
 
-    See spec section 6 for the payload rules each state enforces.
+    See "The lifecycle protocol" in docs/architecture.md for the payload
+    rules each state enforces.
     """
 
     running = "running"
@@ -57,8 +58,6 @@ def _is_blank(value: str | None) -> bool:
 @dataclass(frozen=True)
 class LifecycleReport:
     """A worker's report of its lifecycle state.
-
-    See spec section 6 for the payload rule each state enforces.
 
     Attributes:
         state: The lifecycle state being reported.

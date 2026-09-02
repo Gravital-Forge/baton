@@ -1,8 +1,8 @@
 """Tests for baton.engine."""
 
+import logging
 import re
 import signal
-from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,225 +23,8 @@ from baton.state import StateStore
 from baton.tmux import PaneInfo, TmuxError
 
 
-class FakeTmux:
-    """A stand-in for `TmuxAdapter` that records calls and runs no command."""
-
-    def __init__(
-        self,
-        *,
-        sessions: Sequence[str] = (),
-        pane_infos: Sequence[PaneInfo] = (),
-        create_error: Exception | None = None,
-        kill_errors: Sequence[Exception | None] = (),
-    ) -> None:
-        """Store the scripted sessions, pane readings, and errors.
-
-        Args:
-            sessions: The session names that exist before any call.
-            pane_infos: The `PaneInfo` values `pane_info` returns, in call
-                order. The last one repeats once they run out. With none
-                scripted, `pane_info` returns a dead pane with no pid.
-            create_error: The exception `create_session` raises, when set,
-                instead of recording the call.
-            kill_errors: What `signal_pane` raises on each call, in call
-                order, where `None` is a signal that lands. The last entry
-                repeats once they run out.
-        """
-        self.sessions: set[str] = set(sessions)
-        self._pane_infos = list(pane_infos)
-        self._create_error = create_error
-        self._kill_errors = list(kill_errors)
-        self.has_session_calls: list[str] = []
-        self.created: list[dict[str, object]] = []
-        self.pane_info_calls: list[str] = []
-        self.signals: list[tuple[int, int]] = []
-
-    def has_session(self, session: str) -> bool:
-        """Record the query and report whether the named session exists.
-
-        Args:
-            session: The session name to look up.
-
-        Returns:
-            True when session is in the scripted set of existing sessions.
-        """
-        self.has_session_calls.append(session)
-        return session in self.sessions
-
-    def create_session(self, session: str, start_dir: Path) -> None:
-        """Record the call, or raise the scripted error.
-
-        Args:
-            session: The name to give the new session.
-            start_dir: The directory the new session starts in.
-
-        Raises:
-            Exception: `create_error`, when one was scripted.
-        """
-        if self._create_error is not None:
-            raise self._create_error
-        self.created.append({"session": session, "start_dir": start_dir})
-        self.sessions.add(session)
-
-    def pane_info(self, target: str) -> PaneInfo:
-        """Record the query and return the next scripted `PaneInfo`.
-
-        Args:
-            target: The pane target that was queried.
-
-        Returns:
-            The next scripted `PaneInfo`, repeating the last one once the
-            script is exhausted, or a dead pane with no pid when none was
-            scripted.
-        """
-        self.pane_info_calls.append(target)
-        if not self._pane_infos:
-            return PaneInfo(dead=True, pid=None)
-        index = min(len(self.pane_info_calls) - 1, len(self._pane_infos) - 1)
-        return self._pane_infos[index]
-
-    def signal_pane(self, pid: int, signum: int) -> None:
-        """Record the call, then raise this call's scripted error, if any.
-
-        Args:
-            pid: The process ID that was signalled.
-            signum: The signal number that was sent.
-
-        Raises:
-            Exception: The error scripted for this call, when one was.
-        """
-        self.signals.append((pid, signum))
-        if not self._kill_errors:
-            return
-        index = min(len(self.signals) - 1, len(self._kill_errors) - 1)
-        error = self._kill_errors[index]
-        if error is not None:
-            raise error
-
-
-class FakeLauncher:
-    """A stand-in for `WorkerLauncher` that writes prompt files and runs no process."""
-
-    def __init__(
-        self,
-        state_dir: Path,
-        *,
-        pane_pid: int | None = 4242,
-        launch_errors: Sequence[Exception | None] = (),
-    ) -> None:
-        """Store where prompts are written and how each launch behaves.
-
-        Args:
-            state_dir: The directory prompt files are written under.
-            pane_pid: The `pane_pid` every launched `WorkerRecord` carries.
-            launch_errors: What `launch` raises on each call, in call
-                order, where `None` is a launch that succeeds. The last
-                entry repeats once they run out.
-        """
-        self._state_dir = state_dir
-        self._pane_pid = pane_pid
-        self._launch_errors = list(launch_errors)
-        self.launches: list[dict[str, object]] = []
-        self.installs: list[Path] = []
-        self.mcp_config_writes = 0
-
-    def launch(self, project_path: Path, pane_target: str, prompt: str) -> WorkerRecord:
-        """Record the call, write the prompt file, and return a worker record.
-
-        Args:
-            project_path: The directory the worker's pane starts in.
-            pane_target: The tmux pane the worker is launched into.
-            prompt: The task prompt given to the worker.
-
-        Returns:
-            A `WorkerRecord` naming this launch's worker, in launch order.
-
-        Raises:
-            Exception: The error scripted for this call, when one was.
-        """
-        self._raise_scripted_launch_error()
-        self.launches.append(
-            {
-                "project_path": project_path,
-                "pane_target": pane_target,
-                "prompt": prompt,
-            }
-        )
-        worker_id = f"worker-{len(self.launches)}"
-        worker_dir = self._state_dir / "workers" / worker_id
-        worker_dir.mkdir(parents=True, exist_ok=True)
-        prompt_path = worker_dir / "prompt.md"
-        prompt_path.write_text(prompt, encoding="utf-8")
-        return WorkerRecord(
-            worker_id=worker_id,
-            prompt_path=prompt_path,
-            launched_at=datetime.now(UTC),
-            pane_pid=self._pane_pid,
-        )
-
-    def _raise_scripted_launch_error(self) -> None:
-        """Raise the error scripted for the launch about to be made.
-
-        Raises:
-            Exception: The error scripted for this call, when one was.
-        """
-        if not self._launch_errors:
-            return
-        index = min(len(self.launches), len(self._launch_errors) - 1)
-        error = self._launch_errors[index]
-        if error is not None:
-            raise error
-
-    def install_skill(self, project_path: Path) -> Path:
-        """Record the project path and return the skill's would-be path.
-
-        Args:
-            project_path: The project directory to install the skill into.
-
-        Returns:
-            The path the skill would be written to. Nothing is written.
-        """
-        self.installs.append(project_path)
-        return project_path / ".claude" / "skills" / "baton-worker" / "SKILL.md"
-
-    def write_mcp_config(self) -> Path:
-        """Record the call and return the mcp.json path. Nothing is written.
-
-        Returns:
-            The path the config would be written to.
-        """
-        self.mcp_config_writes += 1
-        return self._state_dir / "mcp.json"
-
-
 @pytest.fixture
-def tmux() -> FakeTmux:
-    """Build a default `FakeTmux` with no sessions or scripted panes.
-
-    Returns:
-        A `FakeTmux` with an empty session set and no scripted pane info.
-    """
-    return FakeTmux()
-
-
-@pytest.fixture
-def launcher(config: BatonConfig) -> FakeLauncher:
-    """Build a default `FakeLauncher` over the config's state directory.
-
-    Args:
-        config: The config naming the state directory to write prompts
-            under.
-
-    Returns:
-        A `FakeLauncher` with the default pane pid and no launch error.
-    """
-    return FakeLauncher(config.state_dir)
-
-
-@pytest.fixture
-def supervisor(
-    config: BatonConfig, store: StateStore, tmux: FakeTmux, launcher: FakeLauncher
-) -> Supervisor:
+def supervisor(config: BatonConfig, store: StateStore, tmux, launcher) -> Supervisor:
     """Build a `Supervisor` wired to the default fake tmux and launcher.
 
     Args:
@@ -272,14 +55,11 @@ def _persisted_and_live(
     return supervisor.snapshot(), StateStore(config.state_dir).load()
 
 
-# --- Construction and reads ------------------------------------------------
-
-
 def test_supervisor_loads_persisted_state_at_construction(
     config: BatonConfig,
     store: StateStore,
-    tmux: FakeTmux,
-    launcher: FakeLauncher,
+    tmux,
+    launcher,
     tmp_path: Path,
 ) -> None:
     """The supervisor loads the persisted ProjectState at construction."""
@@ -304,7 +84,7 @@ def test_supervisor_loads_persisted_state_at_construction(
 
 
 def test_recent_events_returns_the_stores_events_newest_last(
-    config: BatonConfig, store: StateStore, tmux: FakeTmux, launcher: FakeLauncher
+    config: BatonConfig, store: StateStore, tmux, launcher
 ) -> None:
     """recent_events returns the store's events, oldest first, newest last."""
     store.append_event(EventKind.milestone, "worker-1", {"message": "first"})
@@ -316,14 +96,11 @@ def test_recent_events_returns_the_stores_events_newest_last(
     assert [event.payload["message"] for event in events] == ["first", "second"]
 
 
-# --- Initialization ----------------------------------------------------------
-
-
 @pytest.mark.anyio
 async def test_initialize_launches_the_first_worker_and_records_phase_running(
     config: BatonConfig,
-    tmux: FakeTmux,
-    launcher: FakeLauncher,
+    tmux,
+    launcher,
     supervisor: Supervisor,
     project_dir: Path,
 ) -> None:
@@ -342,7 +119,7 @@ async def test_initialize_launches_the_first_worker_and_records_phase_running(
         assert state.worker is not None
         assert state.worker.worker_id == "worker-1"
 
-    assert launcher.mcp_config_writes == 1
+    assert (config.state_dir / "mcp.json").exists()
     assert launcher.installs == [resolved]
     assert tmux.created == [{"session": expected_session, "start_dir": resolved}]
     assert launcher.launches[0] == {
@@ -390,10 +167,10 @@ async def test_initialize_with_explicit_session_name_overrides_the_default(
 
 @pytest.mark.anyio
 async def test_initialize_does_not_create_an_already_existing_session(
-    config: BatonConfig, store: StateStore, launcher: FakeLauncher, project_dir: Path
+    config: BatonConfig, store: StateStore, make_tmux, launcher, project_dir: Path
 ) -> None:
     """An existing tmux session is not created again."""
-    tmux = FakeTmux(sessions=["baton-project"])
+    tmux = make_tmux(sessions=["baton-project"])
     supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
 
     await supervisor.initialize(project_dir, "start here")
@@ -468,11 +245,53 @@ async def test_initialize_is_refused_for_a_path_that_is_not_a_directory(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("initial_prompt", ["", "  \n\t "])
+async def test_initialize_is_refused_for_a_blank_initial_prompt(
+    config: BatonConfig,
+    launcher,
+    supervisor: Supervisor,
+    project_dir: Path,
+    initial_prompt: str,
+) -> None:
+    """A blank initial prompt is refused before anything is written."""
+    expected = f"initial prompt must not be blank, got {initial_prompt!r}"
+
+    with pytest.raises(SupervisorError, match=re.escape(expected)):
+        await supervisor.initialize(project_dir, initial_prompt)
+
+    assert supervisor.snapshot().phase == ProjectPhase.uninitialized
+    assert launcher.installs == []
+    assert not (config.state_dir / "mcp.json").exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("session_name", ["", "  \n\t "])
+async def test_initialize_is_refused_for_a_blank_session_name(
+    config: BatonConfig,
+    launcher,
+    supervisor: Supervisor,
+    project_dir: Path,
+    session_name: str,
+) -> None:
+    """A session name that is given but blank is refused before anything is written."""
+    expected = f"session name must not be blank, got {session_name!r}"
+
+    with pytest.raises(SupervisorError, match=re.escape(expected)):
+        await supervisor.initialize(
+            project_dir, "start here", session_name=session_name
+        )
+
+    assert supervisor.snapshot().phase == ProjectPhase.uninitialized
+    assert launcher.installs == []
+    assert not (config.state_dir / "mcp.json").exists()
+
+
+@pytest.mark.anyio
 async def test_initialize_after_completed_starts_a_new_project(
     config: BatonConfig,
     store: StateStore,
-    tmux: FakeTmux,
-    launcher: FakeLauncher,
+    tmux,
+    launcher,
     project_dir: Path,
     tmp_path: Path,
 ) -> None:
@@ -496,10 +315,10 @@ async def test_initialize_after_completed_starts_a_new_project(
 
 @pytest.mark.anyio
 async def test_tmux_error_from_create_session_propagates_and_leaves_no_state(
-    config: BatonConfig, store: StateStore, launcher: FakeLauncher, project_dir: Path
+    config: BatonConfig, store: StateStore, make_tmux, launcher, project_dir: Path
 ) -> None:
     """A TmuxError from create_session propagates, leaving no state.json."""
-    tmux = FakeTmux(create_error=TmuxError("boom"))
+    tmux = make_tmux(create_error=TmuxError("boom"))
     supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
 
     with pytest.raises(TmuxError) as exc_info:
@@ -512,10 +331,10 @@ async def test_tmux_error_from_create_session_propagates_and_leaves_no_state(
 
 @pytest.mark.anyio
 async def test_tmux_error_from_launch_propagates_and_leaves_no_state(
-    config: BatonConfig, store: StateStore, tmux: FakeTmux, project_dir: Path
+    config: BatonConfig, store: StateStore, tmux, make_launcher, project_dir: Path
 ) -> None:
     """A TmuxError from the launcher's launch propagates, leaving no state.json."""
-    launcher = FakeLauncher(config.state_dir, launch_errors=[TmuxError("no claude")])
+    launcher = make_launcher(launch_errors=[TmuxError("no claude")])
     supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
 
     with pytest.raises(TmuxError) as exc_info:
@@ -524,9 +343,6 @@ async def test_tmux_error_from_launch_propagates_and_leaves_no_state(
     assert str(exc_info.value) == "no claude"
     assert supervisor.snapshot().phase == ProjectPhase.uninitialized
     assert not store.state_path.exists()
-
-
-# --- Milestones --------------------------------------------------------------
 
 
 @pytest.mark.anyio
@@ -573,9 +389,6 @@ async def test_record_status_when_no_worker_is_running_is_refused(
         await supervisor.record_status("nope", "halfway done")
 
 
-# --- Lifecycle: transitions ---------------------------------------------------
-
-
 @pytest.mark.anyio
 async def test_running_report_updates_last_report_without_a_phase_transition(
     config: BatonConfig, supervisor: Supervisor, project_dir: Path
@@ -601,7 +414,7 @@ async def test_running_report_updates_last_report_without_a_phase_transition(
 
 @pytest.mark.anyio
 async def test_blocked_report_sets_phase_blocked_and_keeps_the_worker(
-    config: BatonConfig, supervisor: Supervisor, tmux: FakeTmux, project_dir: Path
+    config: BatonConfig, supervisor: Supervisor, tmux, project_dir: Path
 ) -> None:
     """A blocked report sets phase blocked, keeps the worker, signals nothing."""
     result = await supervisor.initialize(project_dir, "start here")
@@ -647,7 +460,7 @@ async def test_blocked_worker_can_later_report_success_like_any_worker(
 
 @pytest.mark.anyio
 async def test_report_lifecycle_returns_before_the_finish_runs(
-    supervisor: Supervisor, tmux: FakeTmux, project_dir: Path
+    supervisor: Supervisor, tmux, project_dir: Path
 ) -> None:
     """report_lifecycle returns while the finish is still pending."""
     result = await supervisor.initialize(project_dir, "start here")
@@ -668,7 +481,7 @@ async def test_report_lifecycle_returns_before_the_finish_runs(
 async def test_success_report_terminates_and_launches_the_next_worker(
     config: BatonConfig,
     supervisor: Supervisor,
-    launcher: FakeLauncher,
+    launcher,
     project_dir: Path,
 ) -> None:
     """A success report launches the next worker with the report's next prompt."""
@@ -730,7 +543,7 @@ async def test_success_report_produces_the_full_event_sequence_in_order(
 async def test_completed_report_terminates_and_stops_with_no_worker(
     config: BatonConfig,
     supervisor: Supervisor,
-    launcher: FakeLauncher,
+    launcher,
     project_dir: Path,
 ) -> None:
     """A completed report terminates the worker and stops in phase completed."""
@@ -751,8 +564,8 @@ async def test_completed_report_terminates_and_stops_with_no_worker(
 async def test_failed_report_terminates_and_stops_with_no_worker(
     config: BatonConfig,
     supervisor: Supervisor,
-    tmux: FakeTmux,
-    launcher: FakeLauncher,
+    tmux,
+    launcher,
     project_dir: Path,
 ) -> None:
     """A failed report terminates the worker and stops in phase failed."""
@@ -773,12 +586,10 @@ async def test_failed_report_terminates_and_stops_with_no_worker(
 
 @pytest.mark.anyio
 async def test_a_failed_relaunch_stops_in_failed_rather_than_stranding_the_project(
-    config: BatonConfig, store: StateStore, tmux: FakeTmux, project_dir: Path
+    config: BatonConfig, store: StateStore, tmux, make_launcher, project_dir: Path
 ) -> None:
     """A launch that fails during the finish stops in failed, not in terminating."""
-    launcher = FakeLauncher(
-        config.state_dir, launch_errors=[None, TmuxError("session gone")]
-    )
+    launcher = make_launcher(launch_errors=[None, TmuxError("session gone")])
     supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
     result = await supervisor.initialize(project_dir, "start here")
 
@@ -800,6 +611,37 @@ async def test_a_failed_relaunch_stops_in_failed_rather_than_stranding_the_proje
     assert phase_event.payload["from"] == ProjectPhase.terminating.value
     assert phase_event.payload["to"] == ProjectPhase.failed.value
     assert "session gone" in str(phase_event.payload["reason"])
+
+
+@pytest.mark.anyio
+async def test_a_failed_handoff_is_logged_when_it_happens(
+    config: BatonConfig,
+    store: StateStore,
+    tmux,
+    make_launcher,
+    project_dir: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A handoff that fails reaches the daemon's log, with its traceback."""
+    launcher = make_launcher(launch_errors=[None, TmuxError("session gone")])
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+    result = await supervisor.initialize(project_dir, "start here")
+
+    with caplog.at_level(logging.ERROR, logger="baton.engine"):
+        await supervisor.report_lifecycle(
+            result.worker.worker_id,
+            LifecycleState.success,
+            message="phase one done",
+            next_prompt="phase two",
+        )
+        with pytest.raises(TmuxError, match="session gone"):
+            await supervisor.wait_for_finish()
+
+    records = [record for record in caplog.records if record.name == "baton.engine"]
+    assert len(records) == 1
+    assert records[0].levelno == logging.ERROR
+    assert records[0].getMessage() == "the handoff after a 'success' report failed"
+    assert records[0].exc_info is not None
 
 
 @pytest.mark.anyio
@@ -858,12 +700,9 @@ async def test_payload_violation_surfaces_as_supervisor_error(
         )
 
 
-# --- Termination ---------------------------------------------------------------
-
-
 @pytest.mark.anyio
 async def test_terminating_an_already_dead_pane_signals_nothing(
-    supervisor: Supervisor, tmux: FakeTmux, project_dir: Path
+    supervisor: Supervisor, tmux, project_dir: Path
 ) -> None:
     """A pane already dead is not signalled, even when a pid was recorded."""
     result = await supervisor.initialize(project_dir, "start here")
@@ -885,10 +724,10 @@ async def test_terminating_an_already_dead_pane_signals_nothing(
 
 @pytest.mark.anyio
 async def test_terminating_a_live_pane_prefers_the_panes_own_pid(
-    config: BatonConfig, store: StateStore, launcher: FakeLauncher, project_dir: Path
+    config: BatonConfig, store: StateStore, make_tmux, launcher, project_dir: Path
 ) -> None:
     """The live pane's pid outranks the one recorded at launch."""
-    tmux = FakeTmux(
+    tmux = make_tmux(
         pane_infos=[PaneInfo(dead=False, pid=99), PaneInfo(dead=True, pid=None)]
     )
     supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
@@ -905,10 +744,10 @@ async def test_terminating_a_live_pane_prefers_the_panes_own_pid(
 
 @pytest.mark.anyio
 async def test_terminating_falls_back_to_the_recorded_pid(
-    config: BatonConfig, store: StateStore, launcher: FakeLauncher, project_dir: Path
+    config: BatonConfig, store: StateStore, make_tmux, launcher, project_dir: Path
 ) -> None:
     """A live pane that reports no pid falls back to the recorded one."""
-    tmux = FakeTmux(
+    tmux = make_tmux(
         pane_infos=[PaneInfo(dead=False, pid=None), PaneInfo(dead=True, pid=None)]
     )
     supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
@@ -930,10 +769,10 @@ async def test_terminating_falls_back_to_the_recorded_pid(
 
 @pytest.mark.anyio
 async def test_terminating_a_live_pane_sends_sigterm_then_sigkill(
-    config: BatonConfig, store: StateStore, launcher: FakeLauncher, project_dir: Path
+    config: BatonConfig, store: StateStore, make_tmux, launcher, project_dir: Path
 ) -> None:
     """A pane that stays alive after SIGTERM is escalated to SIGKILL."""
-    tmux = FakeTmux(pane_infos=[PaneInfo(dead=False, pid=4242)])
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=4242)])
     supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
     result = await supervisor.initialize(project_dir, "start here")
 
@@ -956,10 +795,10 @@ async def test_terminating_a_live_pane_sends_sigterm_then_sigkill(
 
 @pytest.mark.anyio
 async def test_process_lookup_error_from_signal_pane_does_not_stop_the_finish(
-    config: BatonConfig, store: StateStore, launcher: FakeLauncher, project_dir: Path
+    config: BatonConfig, store: StateStore, make_tmux, launcher, project_dir: Path
 ) -> None:
     """A ProcessLookupError from signal_pane is swallowed; the finish completes."""
-    tmux = FakeTmux(
+    tmux = make_tmux(
         pane_infos=[PaneInfo(dead=False, pid=4242)],
         kill_errors=[ProcessLookupError()],
     )
@@ -982,11 +821,11 @@ async def test_process_lookup_error_from_signal_pane_does_not_stop_the_finish(
 
 @pytest.mark.anyio
 async def test_termination_polls_until_the_pane_dies_before_escalating(
-    config: BatonConfig, store: StateStore, launcher: FakeLauncher, project_dir: Path
+    config: BatonConfig, store: StateStore, make_tmux, launcher, project_dir: Path
 ) -> None:
     """A pane that dies while being polled is never escalated to SIGKILL."""
     patient = replace(config, termination_timeout=5)
-    tmux = FakeTmux(
+    tmux = make_tmux(
         pane_infos=[
             PaneInfo(dead=False, pid=4242),
             PaneInfo(dead=False, pid=4242),
@@ -1007,10 +846,10 @@ async def test_termination_polls_until_the_pane_dies_before_escalating(
 
 @pytest.mark.anyio
 async def test_a_pane_that_exits_just_before_sigkill_is_not_an_error(
-    config: BatonConfig, store: StateStore, launcher: FakeLauncher, project_dir: Path
+    config: BatonConfig, store: StateStore, make_tmux, launcher, project_dir: Path
 ) -> None:
     """A worker that exits between the last poll and SIGKILL is not an error."""
-    tmux = FakeTmux(
+    tmux = make_tmux(
         pane_infos=[PaneInfo(dead=False, pid=4242)],
         kill_errors=[None, ProcessLookupError()],
     )
@@ -1028,11 +867,11 @@ async def test_a_pane_that_exits_just_before_sigkill_is_not_an_error(
 
 @pytest.mark.anyio
 async def test_termination_signals_nothing_when_no_pid_is_known(
-    config: BatonConfig, store: StateStore, project_dir: Path
+    config: BatonConfig, store: StateStore, make_tmux, make_launcher, project_dir: Path
 ) -> None:
     """A live pane with no pid, and no recorded pid, is not signalled."""
-    tmux = FakeTmux(pane_infos=[PaneInfo(dead=False, pid=None)])
-    launcher = FakeLauncher(config.state_dir, pane_pid=None)
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=None)])
+    launcher = make_launcher(pane_pid=None)
     supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
     result = await supervisor.initialize(project_dir, "start here")
 
@@ -1048,9 +887,6 @@ async def test_termination_signals_nothing_when_no_pid_is_known(
         if event.kind == EventKind.terminate
     )
     assert terminate_event.payload == {"pid": None, "signals": []}
-
-
-# --- wait_for_finish -------------------------------------------------------
 
 
 @pytest.mark.anyio

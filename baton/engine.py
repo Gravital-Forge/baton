@@ -1,10 +1,11 @@
 """The supervisor engine driving baton's worker lifecycle.
 
-See spec sections 6 (lifecycle protocol), 7 (grace period), 13.8
-(termination), and 17 (state machine) for the rules this module encodes.
+See "The lifecycle protocol" and "The normal loop" in docs/architecture.md
+for the rules this module encodes.
 """
 
 import asyncio
+import logging
 import signal
 import time
 from pathlib import Path
@@ -21,7 +22,7 @@ from baton.models import (
 )
 from baton.state import StateStore
 from baton.tmux import TmuxAdapter
-from baton.worker import WorkerLauncher
+from baton.worker import WorkerLauncher, write_mcp_config
 
 
 class SupervisorError(Exception):
@@ -36,8 +37,8 @@ class Supervisor:
 
     A `Supervisor` launches a project's first worker, receives its
     lifecycle reports, and — on a terminal report — terminates the
-    worker and either launches the next one or stops. See spec section
-    17 for the phases a project moves through.
+    worker and either launches the next one or stops. See "The normal
+    loop" in docs/architecture.md for the phases a project moves through.
     """
 
     def __init__(
@@ -69,8 +70,9 @@ class Supervisor:
     ) -> ProjectState:
         """Start a new project by launching its first worker.
 
-        See spec §13.2 for the session layout and the default session
-        name, and §5 for the protocol skill every worker is given.
+        See "The tmux layout" in docs/architecture.md for the session
+        layout and the default session name, and "The lifecycle protocol"
+        for the skill every worker is given.
 
         Args:
             project_path: The project directory to supervise.
@@ -83,8 +85,8 @@ class Supervisor:
 
         Raises:
             SupervisorError: If a project is already running, blocked, or
-                terminating, or if project_path is not an existing
-                directory.
+                terminating; if project_path is not an existing directory;
+                or if initial_prompt or a given session_name is blank.
         """
         async with self._lock:
             if self._state.phase in (
@@ -102,17 +104,21 @@ class Supervisor:
                 raise SupervisorError(
                     f"project path must be an existing directory, got {str(resolved)!r}"
                 )
+            if initial_prompt.strip() == "":
+                raise SupervisorError(
+                    f"initial prompt must not be blank, got {initial_prompt!r}"
+                )
+            if session_name is not None and session_name.strip() == "":
+                raise SupervisorError(
+                    f"session name must not be blank, got {session_name!r}"
+                )
 
             session = (
                 session_name if session_name is not None else f"baton-{resolved.name}"
             )
             pane_target = f"{session}:worker.0"
 
-            # write_mcp_config runs here, not left to the launcher's own
-            # fallback, because the launcher only writes it when it is
-            # absent — a changed BATON_PORT would otherwise never reach
-            # a worker.
-            self._launcher.write_mcp_config()
+            write_mcp_config(self._config)
             self._launcher.install_skill(project_path=resolved)
 
             if not self._tmux.has_session(session=session):
@@ -131,7 +137,9 @@ class Supervisor:
             return self._state
 
     async def record_status(self, worker_id: str, message: str) -> None:
-        """Record a non-authoritative progress milestone. See spec §8.
+        """Record a non-authoritative progress milestone.
+
+        See "The lifecycle protocol" in docs/architecture.md.
 
         Args:
             worker_id: The id of the worker reporting the milestone.
@@ -153,7 +161,9 @@ class Supervisor:
         message: str | None = None,
         next_prompt: str | None = None,
     ) -> None:
-        """Record a worker's lifecycle report and route on it. See spec §6.
+        """Record a worker's lifecycle report and route on it.
+
+        See "The lifecycle protocol" in docs/architecture.md.
 
         Args:
             worker_id: The id of the worker making the report.
@@ -221,7 +231,7 @@ class Supervisor:
         """
         return self._state
 
-    def recent_events(self, count: int = 50) -> list[Event]:
+    def recent_events(self, count: int) -> list[Event]:
         """Return the most recently logged events, oldest first.
 
         Args:
@@ -321,8 +331,8 @@ class Supervisor:
     async def _finish(self, report: LifecycleReport, worker: WorkerRecord) -> None:
         """Run the grace period, terminate the worker, then act on the report.
 
-        See spec §7 for the grace period and §17 for where each terminal
-        report routes the project next.
+        See "The normal loop" in docs/architecture.md for the grace period
+        and for where each terminal report routes the project next.
 
         Args:
             report: The terminal lifecycle report that triggered this
@@ -336,6 +346,9 @@ class Supervisor:
             async with self._lock:
                 self._route(report)
         except Exception as exc:
+            logging.getLogger(__name__).exception(
+                "the handoff after a %r report failed", report.state.value
+            )
             # Whatever went wrong, the project must not be left in
             # terminating: that phase refuses every later report and every
             # new initialization, so the daemon would be stuck until
@@ -350,7 +363,9 @@ class Supervisor:
             raise
 
     def _route(self, report: LifecycleReport) -> None:
-        """Move the project on from a terminated worker's report. See spec §17.
+        """Move the project on from a terminated worker's report.
+
+        See "The normal loop" in docs/architecture.md.
 
         Args:
             report: The terminal lifecycle report to act on.
@@ -368,7 +383,9 @@ class Supervisor:
             self._commit(self._state.updated(phase=ProjectPhase.failed, worker=None))
 
     async def _terminate(self, worker: WorkerRecord) -> None:
-        """Terminate a worker's pane process and log the outcome. See spec §13.8.
+        """Terminate a worker's pane process and log the outcome.
+
+        See "The normal loop" in docs/architecture.md.
 
         Args:
             worker: The worker record whose pane process is terminated.

@@ -51,7 +51,8 @@ class BatonTools:
         tmux session, installs the worker protocol skill in the project, and
         launches the first worker with the initial prompt. One daemon
         supervises one project, so the call is refused while a project is
-        running, blocked, or terminating.
+        running, blocked, or terminating. The initial prompt must not be
+        blank, and neither may a session name when you give one.
 
         Args:
             project_path: The project directory to supervise. It must already
@@ -66,7 +67,8 @@ class BatonTools:
 
         Raises:
             ToolError: If a project is already active, or if project_path is
-                not an existing directory.
+                not an existing directory, or if the initial prompt or a
+                given session name is blank.
         """
         try:
             state = await self._supervisor.initialize(
@@ -189,7 +191,7 @@ class BatonTools:
         Returns:
             The project's phase, the current worker's id or None, the last
             lifecycle report as its state, message and next prompt (None when
-            nothing has been reported), and the 50 most recent events, oldest
+            nothing has been reported), and the most recent events, oldest
             first, each carrying its ISO-8601 timestamp, kind, worker id, and
             payload.
         """
