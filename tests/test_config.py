@@ -128,7 +128,9 @@ def test_explicit_binary_path_that_does_not_exist_raises_value_error(
     missing = str(tmp_path / "missing-claude")
     environ = {"BATON_CLAUDE_BIN": missing}
 
-    expected = re.escape(f"BATON_CLAUDE_BIN={missing!r} is not an executable file")
+    expected = re.escape(
+        f"BATON_CLAUDE_BIN={missing!r} does not resolve to an executable"
+    )
     with pytest.raises(ValueError, match=expected):
         BatonConfig.from_env(environ)
 

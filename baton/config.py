@@ -62,7 +62,7 @@ def _resolve_binary(environ: Mapping[str, str], key: str, name: str) -> Path:
     if value:
         found = shutil.which(value, path=search_path)
         if not found:
-            raise ValueError(f"{key}={value!r} is not an executable file")
+            raise ValueError(f"{key}={value!r} does not resolve to an executable")
     else:
         found = shutil.which(name, path=search_path)
         if not found:
