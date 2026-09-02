@@ -1,0 +1,381 @@
+"""Tests for baton.tools."""
+
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+from mcp.server.mcpserver.exceptions import ToolError
+
+from baton.engine import SupervisorError
+from baton.models import (
+    Event,
+    EventKind,
+    LifecycleReport,
+    LifecycleState,
+    ProjectPhase,
+    ProjectState,
+    WorkerRecord,
+)
+from baton.tools import RECENT_EVENT_COUNT, BatonTools
+from tests.doubles import StubSupervisor
+
+
+def _worker(worker_id: str) -> WorkerRecord:
+    """Build a minimal WorkerRecord carrying the given id.
+
+    Args:
+        worker_id: The worker id to give the record.
+
+    Returns:
+        A WorkerRecord with a placeholder prompt path and launch time;
+        neither is read by anything under test.
+    """
+    return WorkerRecord(
+        worker_id=worker_id,
+        prompt_path=Path("prompt.md"),
+        launched_at=datetime.now(UTC),
+    )
+
+
+@pytest.mark.anyio
+async def test_initialize_project_delegates_path_prompt_and_session_name(
+    make_stub_supervisor: type[StubSupervisor],
+    tmp_path: Path,
+) -> None:
+    """initialize_project delegates a built Path, the prompt, and session name."""
+    stub = make_stub_supervisor()
+    tools = BatonTools(stub)
+
+    await tools.initialize_project(
+        project_path=str(tmp_path),
+        initial_prompt="start here",
+        session_name="custom-session",
+    )
+
+    assert stub.initialize_calls == [
+        {
+            "project_path": tmp_path,
+            "initial_prompt": "start here",
+            "session_name": "custom-session",
+        }
+    ]
+
+
+@pytest.mark.anyio
+async def test_initialize_project_delegates_no_session_name_as_none(
+    make_stub_supervisor: type[StubSupervisor],
+    tmp_path: Path,
+) -> None:
+    """initialize_project delegates session_name=None when the caller omits it."""
+    stub = make_stub_supervisor()
+    tools = BatonTools(stub)
+
+    await tools.initialize_project(
+        project_path=str(tmp_path), initial_prompt="start here"
+    )
+
+    assert stub.initialize_calls[0]["session_name"] is None
+
+
+@pytest.mark.anyio
+async def test_initialize_project_returns_fields_from_the_returned_state(
+    make_stub_supervisor: type[StubSupervisor],
+    tmp_path: Path,
+) -> None:
+    """initialize_project returns fields from the returned state.
+
+    Returns the phase, session name, pane target, and worker id.
+    """
+    returned_state = ProjectState.fresh().updated(
+        phase=ProjectPhase.running,
+        project_path=tmp_path,
+        session_name="baton-project",
+        pane_target="baton-project:worker.0",
+        worker=_worker("worker-1"),
+    )
+    stub = make_stub_supervisor(state=returned_state)
+    tools = BatonTools(stub)
+
+    result = await tools.initialize_project(
+        project_path=str(tmp_path), initial_prompt="start here"
+    )
+
+    assert result == {
+        "phase": "running",
+        "session_name": "baton-project",
+        "pane_target": "baton-project:worker.0",
+        "worker_id": "worker-1",
+    }
+
+
+@pytest.mark.anyio
+async def test_initialize_project_surfaces_a_supervisor_error_as_a_tool_error(
+    make_stub_supervisor: type[StubSupervisor],
+    tmp_path: Path,
+) -> None:
+    """initialize_project surfaces a SupervisorError as an identical ToolError."""
+    stub = make_stub_supervisor(
+        state=ProjectState.fresh(),
+        initialize_error=SupervisorError(
+            f"cannot initialize while the project at {tmp_path} is 'running'"
+        ),
+    )
+    tools = BatonTools(stub)
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.initialize_project(
+            project_path=str(tmp_path), initial_prompt="start here"
+        )
+
+    assert (
+        str(excinfo.value)
+        == f"cannot initialize while the project at {tmp_path} is 'running'"
+    )
+
+
+@pytest.mark.anyio
+async def test_report_status_delegates_worker_id_and_message(
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """report_status delegates the worker id and the message."""
+    stub = make_stub_supervisor()
+    tools = BatonTools(stub)
+
+    await tools.report_status(worker_id="worker-1", message="halfway done")
+
+    assert stub.record_status_calls == [
+        {"worker_id": "worker-1", "message": "halfway done"}
+    ]
+
+
+@pytest.mark.anyio
+async def test_report_status_returns_phase_and_worker_id_from_the_snapshot(
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """report_status reads its reply from the post-call snapshot.
+
+    Returns the phase and worker id from the snapshot, not from the call's
+    own arguments.
+    """
+    state = ProjectState.fresh().updated(
+        phase=ProjectPhase.running, worker=_worker("worker-9")
+    )
+    stub = make_stub_supervisor(state=state)
+    tools = BatonTools(stub)
+
+    result = await tools.report_status(worker_id="worker-1", message="progress")
+
+    assert result == {"phase": "running", "worker_id": "worker-9"}
+
+
+@pytest.mark.anyio
+async def test_report_status_surfaces_a_supervisor_error_as_a_tool_error(
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """report_status surfaces a SupervisorError as an identical-message ToolError."""
+    stub = make_stub_supervisor(
+        state=ProjectState.fresh(),
+        record_status_error=SupervisorError(
+            "worker 'worker-1' is not the current worker; no worker is running"
+        ),
+    )
+    tools = BatonTools(stub)
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.report_status(worker_id="worker-1", message="progress")
+
+    assert (
+        str(excinfo.value)
+        == "worker 'worker-1' is not the current worker; no worker is running"
+    )
+
+
+@pytest.mark.anyio
+async def test_report_lifecycle_converts_state_and_delegates_every_argument(
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """report_lifecycle converts the state string, delegating every argument."""
+    stub = make_stub_supervisor()
+    tools = BatonTools(stub)
+
+    await tools.report_lifecycle(
+        worker_id="worker-1",
+        state="success",
+        message="task done",
+        next_prompt="do the next thing",
+    )
+
+    assert stub.report_lifecycle_calls == [
+        {
+            "worker_id": "worker-1",
+            "state": LifecycleState.success,
+            "message": "task done",
+            "next_prompt": "do the next thing",
+        }
+    ]
+
+
+@pytest.mark.anyio
+async def test_report_lifecycle_returns_phase_and_worker_id_from_the_snapshot(
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """report_lifecycle reads its reply from the post-call snapshot.
+
+    Returns the phase and worker id from the snapshot, not from the call's
+    own arguments.
+    """
+    state = ProjectState.fresh().updated(
+        phase=ProjectPhase.blocked, worker=_worker("worker-9")
+    )
+    stub = make_stub_supervisor(state=state)
+    tools = BatonTools(stub)
+
+    result = await tools.report_lifecycle(
+        worker_id="worker-1", state="blocked", message="need input"
+    )
+
+    assert result == {"phase": "blocked", "worker_id": "worker-9"}
+
+
+@pytest.mark.anyio
+async def test_report_lifecycle_refuses_unknown_state_without_delegating(
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """report_lifecycle refuses an unknown state before delegating.
+
+    Names the offending value and the five valid states in its ToolError.
+    """
+    stub = make_stub_supervisor()
+    tools = BatonTools(stub)
+    expected = (
+        "unknown lifecycle state 'sleeping'; expected one of "
+        "'running', 'success', 'completed', 'failed', 'blocked'"
+    )
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.report_lifecycle(
+            worker_id="worker-1", state="sleeping", message="x"
+        )
+
+    assert str(excinfo.value) == expected
+    assert stub.report_lifecycle_calls == []
+
+
+@pytest.mark.anyio
+async def test_report_lifecycle_surfaces_a_supervisor_error_as_a_tool_error(
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """report_lifecycle surfaces a SupervisorError as an identical-message ToolError."""
+    stub = make_stub_supervisor(
+        state=ProjectState.fresh(),
+        report_lifecycle_error=SupervisorError(
+            "worker 'worker-1' already reported 'success'; the first "
+            "terminal report is final"
+        ),
+    )
+    tools = BatonTools(stub)
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.report_lifecycle(
+            worker_id="worker-1",
+            state="success",
+            message="done",
+            next_prompt="next task",
+        )
+
+    assert str(excinfo.value) == (
+        "worker 'worker-1' already reported 'success'; the first "
+        "terminal report is final"
+    )
+
+
+@pytest.mark.anyio
+async def test_get_project_status_returns_phase_worker_last_report_and_events(
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """get_project_status returns the full project status.
+
+    Asks for RECENT_EVENT_COUNT events, and returns the phase, worker id,
+    serialized last report, and serialized events.
+    """
+    report = LifecycleReport(
+        state=LifecycleState.success, message="done", next_prompt="next task"
+    )
+    timestamp = datetime(2026, 1, 1, tzinfo=UTC)
+    event = Event(
+        timestamp=timestamp,
+        kind=EventKind.milestone,
+        worker_id="worker-1",
+        payload={"message": "halfway"},
+    )
+    state = ProjectState.fresh().updated(
+        phase=ProjectPhase.terminating,
+        worker=_worker("worker-1"),
+        last_report=report,
+    )
+    stub = make_stub_supervisor(state=state, events=[event])
+    tools = BatonTools(stub)
+
+    result = await tools.get_project_status()
+
+    assert stub.recent_events_calls == [RECENT_EVENT_COUNT]
+    assert result == {
+        "phase": "terminating",
+        "worker_id": "worker-1",
+        "last_report": {
+            "state": "success",
+            "message": "done",
+            "next_prompt": "next task",
+        },
+        "events": [
+            {
+                "timestamp": "2026-01-01T00:00:00+00:00",
+                "kind": "milestone",
+                "worker_id": "worker-1",
+                "payload": {"message": "halfway"},
+            }
+        ],
+    }
+
+
+@pytest.mark.anyio
+async def test_get_project_status_on_an_uninitialized_project(
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """get_project_status handles an uninitialized project.
+
+    Returns None for the worker id and the last report, and an empty
+    event list.
+    """
+    stub = make_stub_supervisor()
+    tools = BatonTools(stub)
+
+    result = await tools.get_project_status()
+
+    assert result["worker_id"] is None
+    assert result["last_report"] is None
+    assert result["events"] == []
+
+
+@pytest.mark.anyio
+async def test_get_project_status_serializes_event_timestamp_and_payload(
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """An event reaches the reply with an ISO-8601 timestamp and unchanged payload."""
+    payload = {"from": "running", "to": "blocked", "reason": "needs a human"}
+    timestamp = datetime(2026, 3, 4, 5, 6, 7, tzinfo=UTC)
+    event = Event(
+        timestamp=timestamp, kind=EventKind.phase, worker_id=None, payload=payload
+    )
+    stub = make_stub_supervisor(state=ProjectState.fresh(), events=[event])
+    tools = BatonTools(stub)
+
+    result = await tools.get_project_status()
+
+    serialized = result["events"][0]
+    assert serialized == {
+        "timestamp": timestamp.isoformat(),
+        "kind": "phase",
+        "worker_id": None,
+        "payload": payload,
+    }

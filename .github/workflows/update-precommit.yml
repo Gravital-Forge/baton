@@ -1,0 +1,68 @@
+name: Monthly Pre-commit Hook Updates
+
+on:
+  schedule:
+    # Run on the 1st of every month at 2 AM UTC
+    - cron: "0 2 1 * *"
+  workflow_dispatch: # Allow manual triggering
+
+jobs:
+  update-precommit:
+    name: "Update Pre-commit Hooks"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Install tools
+        run: |
+          pipx install poethepoet
+          pipx install pre-commit
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Update pre-commit hooks
+        run: poe hooks-update
+
+      - name: Check for changes
+        id: check-changes
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "changes=true" >> $GITHUB_OUTPUT
+            echo "Files changed:"
+            git status --porcelain
+          else
+            echo "changes=false" >> $GITHUB_OUTPUT
+            echo "No changes detected"
+          fi
+
+      - name: Create Pull Request
+        if: steps.check-changes.outputs.changes == 'true'
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore: update pre-commit hooks"
+          title: "chore: update pre-commit hooks"
+          body: |
+            This PR was automatically created by the monthly pre-commit hook update workflow.
+
+            Changes include:
+              - Updated pre-commit hooks
+
+            The workflow runs monthly to ensure all pre-commit hooks stay up-to-date.
+          branch: "chore/update-precommit-hooks"
+          delete-branch: true
