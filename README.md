@@ -88,8 +88,9 @@ When `initialize_project` refuses because a stopped daemon left `state.json` beh
 1. Stop the daemon.
 2. Delete `state.json` from the state directory.
 3. Start the daemon.
-4. Initialize the project again. This kills any worker still running from before the restart,
-   without giving it a chance to report.
+4. Initialize the project again with the same session name (the default gives the same name for
+   the same project directory). The launch replaces the worker still running from before the
+   restart, without giving it a chance to report.
 
 See "The normal loop" in [`docs/architecture.md`](docs/architecture.md) for why the daemon
 refuses.

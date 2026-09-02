@@ -62,9 +62,8 @@ A daemon that starts and finds `state.json` in one of those phases refuses `init
 same way, until somebody removes that file by hand. Baton reads `state.json` only when the daemon
 starts, so removing the file takes effect at the next start. That is also what a daemon stopped
 mid-handoff leaves behind: the worker keeps running, and the state file still says `terminating`.
-`initialize_project` then reuses that tmux session if one exists and launches the next worker with
-`respawn-pane -k`, which kills whatever the pane still runs, so the leftover worker dies without
-reporting.
+`initialize_project` then reuses that tmux session if one exists, and its launch replaces whatever
+the pane still runs (see "The tmux layout"), so the leftover worker dies without reporting.
 
 Baton logs the loop as a sequence of events in `events.jsonl`.
 
