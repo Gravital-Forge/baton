@@ -1,0 +1,90 @@
+[project]
+name = "baton"
+version = "0.0.1"
+description = "Baton"
+authors = [{name = "Matt Krainski", email = "matt@gravitalforge.com"}]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["mcp[cli]>=2.0.0,<3"]
+
+[dependency-groups]
+dev = [
+    "coverage>=7.15.1,<8.0.0",
+    "pytest>=9.1.1,<10.0.0",
+    "ruff>=0.15.22,<0.16.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "B",    # flake8-bugbear
+    "A",    # flake8-builtins
+    "C4",   # flake8-comprehensions
+    "D",    # pydocstyle (flake8-docstrings)
+    "ERA",  # eradicate
+    "S",    # flake8-bandit
+    "PGH003",  # blanket `# type: ignore` without a code
+    "PGH004",  # blanket `# noqa` without a code
+    "RUF100",  # unused or stale suppression
+    "TID251",  # banned API; see flake8-tidy-imports.banned-api below
+    "BLE001",  # blind `except Exception`
+    "UP",      # pyupgrade: legacy typing constructs
+    "PTH",     # flake8-use-pathlib
+    "ANN401",  # bare `Any`; the ANN family as a whole is not selected
+]
+ignore = ["D104", "D100", "D101", "D106"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"__future__.annotations" = { msg = "PEP 563 stringization is deprecated; PEP 649 handles forward references natively." }
+
+[tool.ruff.lint.flake8-builtins]
+builtins-ignorelist = ["id"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.uv]
+add-bounds = "major"
+preview = true
+
+[tool.poe]
+envfile = ".env"
+
+[tool.poe.executor]
+type = "uv"
+
+[tool.poe.tasks]
+configure = "./scripts/configure.sh"
+update = "./scripts/update.sh"
+hooks-run = "pre-commit run --all-files"
+hooks-update = "pre-commit autoupdate"
+[tool.poe.tasks.test]
+sequence = [
+    { cmd = "coverage run -m pytest --showlocals" },
+    { cmd = "coverage report" },
+]
+
+[tool.poe.tasks.lint]
+sequence = [
+    { cmd = "ruff check ." },
+    { cmd = "ruff format --check ." },
+]
+
+[tool.poe.tasks.test-full]
+sequence = [
+    { ref = "test" },
+]
