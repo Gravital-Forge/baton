@@ -166,7 +166,7 @@ class BatonTools:
         - ``blocked``: you need a human's input. You stay alive for that human
           and report again once the work can move.
         - ``running``: you are still working. It is for reconciliation only:
-          baton records it and changes nothing.
+          baton records it as the last report and moves no phase.
 
         The payload rules, in the order baton checks them. The message rule is
         checked first, so a report that breaks both is refused for the message

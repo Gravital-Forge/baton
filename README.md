@@ -10,6 +10,7 @@ See [`docs/architecture.md`](docs/architecture.md) for how baton works.
 ## Requirements
 
 - Python 3.12 or later.
+- [uv](https://docs.astral.sh/uv/), which installs baton's dependencies and runs it.
 - `tmux` 3.2 or later. Baton launches every worker with `respawn-pane`, and passes the worker's
   environment through the `-e` flag, which older tmux versions do not have.
 - The `claude` binary, on `PATH` or named by `BATON_CLAUDE_BIN`.
@@ -83,6 +84,6 @@ The `=` is tmux's exact-match prefix. The worker runs in the pane
 ## What baton does not do yet
 
 Baton runs the normal loop: initialize a project, launch a worker, receive its reports, and hand
-off or stop on a terminal one. It does not yet notice a worker that has vanished, run a diagnosis
-worker, recover from a failure, or reconcile with a live worker after a restart. See
-[`docs/architecture.md`](docs/architecture.md) for what that leaves out.
+off or stop on a terminal one. The recovery paths around that loop are not built. See
+[`docs/architecture.md`](docs/architecture.md) for which ones, and for what a reader should not
+assume.

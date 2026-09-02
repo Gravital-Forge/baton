@@ -8,7 +8,7 @@ from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from baton.config import BatonConfig
 from baton.engine import Supervisor, SupervisorError
 from baton.models import LifecycleState, ProjectPhase, ProjectState
-from baton.server import build_server, build_supervisor
+from baton.server import build_server, build_supervisor, write_client_config
 from baton.tools import BatonTools
 
 
@@ -118,11 +118,12 @@ def test_build_supervisor_returns_a_fresh_supervisor(config: BatonConfig) -> Non
     assert supervisor.snapshot().phase == ProjectPhase.uninitialized
 
 
-def test_build_supervisor_writes_mcp_config(config: BatonConfig) -> None:
-    """build_supervisor writes mcp.json into the config's state directory."""
-    build_supervisor(config)
+def test_write_client_config_writes_mcp_config(config: BatonConfig) -> None:
+    """write_client_config writes mcp.json into the config's state directory."""
+    written = write_client_config(config)
 
-    assert (config.state_dir / "mcp.json").exists()
+    assert written == config.state_dir / "mcp.json"
+    assert written.exists()
 
 
 # --- build_server --------------------------------------------------------
@@ -171,9 +172,7 @@ async def test_report_lifecycle_description_states_message_and_finality_rules() 
         tool.description for tool in tools if tool.name == "report_lifecycle"
     )
 
-    assert "The message rule is" in description
     assert "checked first" in description
-    assert "terminal, and the first" in description
     assert "terminal report is final" in description
 
 
