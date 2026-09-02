@@ -57,6 +57,9 @@ builtins-ignorelist = ["id"]
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.uv]
 add-bounds = "major"
 preview = true

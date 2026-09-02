@@ -8,6 +8,7 @@ from baton.engine import Supervisor, SupervisorError
 from baton.models import ProjectPhase
 from baton.server import build_server, build_supervisor
 from baton.tools import BatonTools
+from tests.doubles import StubSupervisor
 
 
 def test_build_supervisor_returns_a_fresh_supervisor(config: BatonConfig) -> None:
@@ -20,7 +21,7 @@ def test_build_supervisor_returns_a_fresh_supervisor(config: BatonConfig) -> Non
 
 @pytest.mark.anyio
 async def test_build_server_registers_exactly_the_four_tool_names(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
 ) -> None:
     """build_server registers only the four pinned tool names, no more, no less."""
     server = build_server(make_stub_supervisor())
@@ -37,7 +38,7 @@ async def test_build_server_registers_exactly_the_four_tool_names(
 
 @pytest.mark.anyio
 async def test_build_server_uses_each_tools_docstring_as_its_description(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
 ) -> None:
     """Each tool's description is its BatonTools method's docstring, unchanged."""
     server = build_server(make_stub_supervisor())
@@ -53,7 +54,7 @@ async def test_build_server_uses_each_tools_docstring_as_its_description(
 
 @pytest.mark.anyio
 async def test_report_lifecycle_description_states_message_and_finality_rules(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
 ) -> None:
     """report_lifecycle's description is what a worker reads before it calls the tool.
 
@@ -73,7 +74,7 @@ async def test_report_lifecycle_description_states_message_and_finality_rules(
 
 @pytest.mark.anyio
 async def test_a_registered_tool_reaches_the_given_supervisor(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
 ) -> None:
     """Calling a registered tool delegates to the supervisor build_server was given."""
     stub = make_stub_supervisor()
@@ -90,7 +91,7 @@ async def test_a_registered_tool_reaches_the_given_supervisor(
 
 @pytest.mark.anyio
 async def test_a_supervisor_error_reaches_the_caller_as_a_tool_error(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
 ) -> None:
     """A SupervisorError is how the framework delivers a refusal to a worker.
 

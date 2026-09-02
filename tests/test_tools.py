@@ -17,6 +17,7 @@ from baton.models import (
     WorkerRecord,
 )
 from baton.tools import RECENT_EVENT_COUNT, BatonTools
+from tests.doubles import StubSupervisor
 
 
 def _worker(worker_id: str) -> WorkerRecord:
@@ -38,7 +39,7 @@ def _worker(worker_id: str) -> WorkerRecord:
 
 @pytest.mark.anyio
 async def test_initialize_project_delegates_path_prompt_and_session_name(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
     tmp_path: Path,
 ) -> None:
     """initialize_project delegates a built Path, the prompt, and session name."""
@@ -62,7 +63,7 @@ async def test_initialize_project_delegates_path_prompt_and_session_name(
 
 @pytest.mark.anyio
 async def test_initialize_project_delegates_no_session_name_as_none(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
     tmp_path: Path,
 ) -> None:
     """initialize_project delegates session_name=None when the caller omits it."""
@@ -78,7 +79,7 @@ async def test_initialize_project_delegates_no_session_name_as_none(
 
 @pytest.mark.anyio
 async def test_initialize_project_returns_fields_from_the_returned_state(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
     tmp_path: Path,
 ) -> None:
     """initialize_project returns fields from the returned state.
@@ -109,7 +110,7 @@ async def test_initialize_project_returns_fields_from_the_returned_state(
 
 @pytest.mark.anyio
 async def test_initialize_project_surfaces_a_supervisor_error_as_a_tool_error(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
     tmp_path: Path,
 ) -> None:
     """initialize_project surfaces a SupervisorError as an identical ToolError."""
@@ -134,7 +135,7 @@ async def test_initialize_project_surfaces_a_supervisor_error_as_a_tool_error(
 
 @pytest.mark.anyio
 async def test_report_status_delegates_worker_id_and_message(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
 ) -> None:
     """report_status delegates the worker id and the message."""
     stub = make_stub_supervisor()
@@ -149,7 +150,7 @@ async def test_report_status_delegates_worker_id_and_message(
 
 @pytest.mark.anyio
 async def test_report_status_returns_phase_and_worker_id_from_the_snapshot(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
 ) -> None:
     """report_status reads its reply from the post-call snapshot.
 
@@ -169,7 +170,7 @@ async def test_report_status_returns_phase_and_worker_id_from_the_snapshot(
 
 @pytest.mark.anyio
 async def test_report_status_surfaces_a_supervisor_error_as_a_tool_error(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
 ) -> None:
     """report_status surfaces a SupervisorError as an identical-message ToolError."""
     stub = make_stub_supervisor(
@@ -191,7 +192,7 @@ async def test_report_status_surfaces_a_supervisor_error_as_a_tool_error(
 
 @pytest.mark.anyio
 async def test_report_lifecycle_converts_state_and_delegates_every_argument(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
 ) -> None:
     """report_lifecycle converts the state string, delegating every argument."""
     stub = make_stub_supervisor()
@@ -216,7 +217,7 @@ async def test_report_lifecycle_converts_state_and_delegates_every_argument(
 
 @pytest.mark.anyio
 async def test_report_lifecycle_returns_phase_and_worker_id_from_the_snapshot(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
 ) -> None:
     """report_lifecycle reads its reply from the post-call snapshot.
 
@@ -238,7 +239,7 @@ async def test_report_lifecycle_returns_phase_and_worker_id_from_the_snapshot(
 
 @pytest.mark.anyio
 async def test_report_lifecycle_refuses_unknown_state_without_delegating(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
 ) -> None:
     """report_lifecycle refuses an unknown state before delegating.
 
@@ -262,7 +263,7 @@ async def test_report_lifecycle_refuses_unknown_state_without_delegating(
 
 @pytest.mark.anyio
 async def test_report_lifecycle_surfaces_a_supervisor_error_as_a_tool_error(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
 ) -> None:
     """report_lifecycle surfaces a SupervisorError as an identical-message ToolError."""
     stub = make_stub_supervisor(
@@ -290,7 +291,7 @@ async def test_report_lifecycle_surfaces_a_supervisor_error_as_a_tool_error(
 
 @pytest.mark.anyio
 async def test_get_project_status_returns_phase_worker_last_report_and_events(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
 ) -> None:
     """get_project_status returns the full project status.
 
@@ -339,7 +340,7 @@ async def test_get_project_status_returns_phase_worker_last_report_and_events(
 
 @pytest.mark.anyio
 async def test_get_project_status_on_an_uninitialized_project(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
 ) -> None:
     """get_project_status handles an uninitialized project.
 
@@ -358,7 +359,7 @@ async def test_get_project_status_on_an_uninitialized_project(
 
 @pytest.mark.anyio
 async def test_get_project_status_serializes_event_timestamp_and_payload(
-    make_stub_supervisor,
+    make_stub_supervisor: type[StubSupervisor],
 ) -> None:
     """An event reaches the reply with an ISO-8601 timestamp and unchanged payload."""
     payload = {"from": "running", "to": "blocked", "reason": "needs a human"}
