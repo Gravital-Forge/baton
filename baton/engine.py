@@ -24,6 +24,8 @@ from baton.state import StateStore
 from baton.tmux import TmuxAdapter
 from baton.worker import WorkerLauncher, write_mcp_config
 
+_log = logging.getLogger(__name__)
+
 
 class SupervisorError(Exception):
     """A refusal.
@@ -71,8 +73,8 @@ class Supervisor:
         """Start a new project by launching its first worker.
 
         See "The tmux layout" in docs/architecture.md for the session
-        layout and the default session name, and "The lifecycle protocol"
-        for the skill every worker is given.
+        layout, and "The lifecycle protocol" for the skill every worker
+        is given.
 
         Args:
             project_path: The project directory to supervise.
@@ -139,7 +141,7 @@ class Supervisor:
     async def record_status(self, worker_id: str, message: str) -> None:
         """Record a non-authoritative progress milestone.
 
-        See "The lifecycle protocol" in docs/architecture.md.
+        See "The normal loop" in docs/architecture.md.
 
         Args:
             worker_id: The id of the worker reporting the milestone.
@@ -346,9 +348,7 @@ class Supervisor:
             async with self._lock:
                 self._route(report)
         except Exception as exc:
-            logging.getLogger(__name__).exception(
-                "the handoff after a %r report failed", report.state.value
-            )
+            _log.exception("the handoff after a %r report failed", report.state.value)
             # Whatever went wrong, the project must not be left in
             # terminating: that phase refuses every later report and every
             # new initialization, so the daemon would be stuck until

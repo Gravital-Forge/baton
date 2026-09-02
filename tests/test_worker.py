@@ -3,7 +3,6 @@
 import json
 import shlex
 import uuid
-from collections.abc import Mapping
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -13,57 +12,6 @@ from baton.models import WorkerRecord
 from baton.prompts import WORKER_PREAMBLE
 from baton.tmux import PaneInfo
 from baton.worker import WorkerLauncher, write_mcp_config
-
-
-class FakeTmux:
-    """A stand-in for `TmuxAdapter` that records calls and runs no command.
-
-    `respawn_pane` calls are recorded as dicts of their arguments.
-    `pane_info` calls are recorded as the target queried, and every call
-    returns the `PaneInfo` given to the constructor.
-    """
-
-    def __init__(self, pane_info: PaneInfo) -> None:
-        """Store the `PaneInfo` every `pane_info` call should return.
-
-        Args:
-            pane_info: The value `pane_info` returns on every call.
-        """
-        self._pane_info = pane_info
-        self.respawn_calls: list[dict[str, object]] = []
-        self.pane_info_calls: list[str] = []
-
-    def respawn_pane(
-        self, target: str, start_dir: Path, env: Mapping[str, str], command: str
-    ) -> None:
-        """Record a `respawn_pane` call instead of running `tmux`.
-
-        Args:
-            target: The pane target that was respawned.
-            start_dir: The start directory that was passed.
-            env: The environment mapping that was passed.
-            command: The command string that was passed.
-        """
-        self.respawn_calls.append(
-            {
-                "target": target,
-                "start_dir": start_dir,
-                "env": dict(env),
-                "command": command,
-            }
-        )
-
-    def pane_info(self, target: str) -> PaneInfo:
-        """Record the queried target and return the scripted `PaneInfo`.
-
-        Args:
-            target: The pane target that was queried.
-
-        Returns:
-            The `PaneInfo` given to the constructor.
-        """
-        self.pane_info_calls.append(target)
-        return self._pane_info
 
 
 def _expected_launch_script(
@@ -93,10 +41,10 @@ def _expected_launch_script(
 
 
 def test_launch_writes_the_prompt_text_to_prompt_md(
-    config: BatonConfig, project_dir: Path
+    config: BatonConfig, project_dir: Path, make_tmux
 ) -> None:
     """Launch writes the given prompt text to prompt.md under the worker dir."""
-    tmux = FakeTmux(PaneInfo(dead=False, pid=111))
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=111)])
     launcher = WorkerLauncher(config, tmux)
 
     record = launcher.launch(project_dir, "baton-1:worker", "do the thing")
@@ -105,10 +53,10 @@ def test_launch_writes_the_prompt_text_to_prompt_md(
 
 
 def test_launch_script_matches_the_pinned_template_line_by_line(
-    config: BatonConfig, project_dir: Path
+    config: BatonConfig, project_dir: Path, make_tmux
 ) -> None:
     """launch.sh matches the pinned template exactly, line by line."""
-    tmux = FakeTmux(PaneInfo(dead=False, pid=111))
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=111)])
     launcher = WorkerLauncher(config, tmux)
 
     record = launcher.launch(project_dir, "baton-1:worker", "do the thing")
@@ -127,10 +75,10 @@ def test_launch_script_matches_the_pinned_template_line_by_line(
 
 
 def test_launch_script_is_written_with_mode_0o755(
-    config: BatonConfig, project_dir: Path
+    config: BatonConfig, project_dir: Path, make_tmux
 ) -> None:
     """launch.sh is written with executable mode 0o755."""
-    tmux = FakeTmux(PaneInfo(dead=False, pid=111))
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=111)])
     launcher = WorkerLauncher(config, tmux)
 
     record = launcher.launch(project_dir, "baton-1:worker", "do the thing")
@@ -140,13 +88,13 @@ def test_launch_script_is_written_with_mode_0o755(
 
 
 def test_launch_script_quotes_every_path_containing_a_space(
-    tmp_path: Path, project_dir: Path, config: BatonConfig
+    tmp_path: Path, project_dir: Path, config: BatonConfig, make_tmux
 ) -> None:
     """Paths with a space are shell-quoted wherever launch.sh names them."""
     state_dir = tmp_path / "state dir"
     claude_bin = tmp_path / "claude code" / "claude"
     config = replace(config, state_dir=state_dir, claude_bin=claude_bin)
-    tmux = FakeTmux(PaneInfo(dead=False, pid=111))
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=111)])
     launcher = WorkerLauncher(config, tmux)
 
     record = launcher.launch(project_dir, "baton-1:worker", "do the thing")
@@ -159,10 +107,10 @@ def test_launch_script_quotes_every_path_containing_a_space(
 
 
 def test_launch_script_uses_the_shell_quoted_worker_preamble(
-    config: BatonConfig, project_dir: Path
+    config: BatonConfig, project_dir: Path, make_tmux
 ) -> None:
     """--append-system-prompt carries the shell-quoted WORKER_PREAMBLE."""
-    tmux = FakeTmux(PaneInfo(dead=False, pid=111))
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=111)])
     launcher = WorkerLauncher(config, tmux)
 
     record = launcher.launch(project_dir, "baton-1:worker", "do the thing")
@@ -174,10 +122,10 @@ def test_launch_script_uses_the_shell_quoted_worker_preamble(
 
 
 def test_launch_respawns_the_pane_with_env_and_quoted_command(
-    config: BatonConfig, project_dir: Path
+    config: BatonConfig, project_dir: Path, make_tmux
 ) -> None:
     """Launch respawns the target pane with the launch script env and command."""
-    tmux = FakeTmux(PaneInfo(dead=False, pid=111))
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=111)])
     launcher = WorkerLauncher(config, tmux)
 
     record = launcher.launch(project_dir, "baton-1:worker", "do the thing")
@@ -194,10 +142,10 @@ def test_launch_respawns_the_pane_with_env_and_quoted_command(
 
 
 def test_launch_returns_a_worker_record_with_the_expected_shape(
-    config: BatonConfig, project_dir: Path
+    config: BatonConfig, project_dir: Path, make_tmux
 ) -> None:
     """Launch returns a WorkerRecord with a UUID id, prompt path, UTC time, pid."""
-    tmux = FakeTmux(PaneInfo(dead=False, pid=4242))
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=4242)])
     launcher = WorkerLauncher(config, tmux)
 
     record = launcher.launch(project_dir, "baton-1:worker", "do the thing")
@@ -213,10 +161,10 @@ def test_launch_returns_a_worker_record_with_the_expected_shape(
 
 
 def test_launch_records_pane_pid_none_when_pane_has_no_pid(
-    config: BatonConfig, project_dir: Path
+    config: BatonConfig, project_dir: Path, make_tmux
 ) -> None:
     """Launch stores pane_pid=None when pane_info reports no pid."""
-    tmux = FakeTmux(PaneInfo(dead=True, pid=None))
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=True, pid=None)])
     launcher = WorkerLauncher(config, tmux)
 
     record = launcher.launch(project_dir, "baton-1:worker", "do the thing")
@@ -225,10 +173,10 @@ def test_launch_records_pane_pid_none_when_pane_has_no_pid(
 
 
 def test_launch_twice_mints_different_worker_ids_and_directories(
-    config: BatonConfig, project_dir: Path
+    config: BatonConfig, project_dir: Path, make_tmux
 ) -> None:
     """Two launches produce distinct worker ids and distinct worker directories."""
-    tmux = FakeTmux(PaneInfo(dead=False, pid=111))
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=111)])
     launcher = WorkerLauncher(config, tmux)
 
     first = launcher.launch(project_dir, "baton-1:worker", "task one")
@@ -239,10 +187,10 @@ def test_launch_twice_mints_different_worker_ids_and_directories(
 
 
 def test_launch_does_not_write_the_mcp_config(
-    config: BatonConfig, project_dir: Path
+    config: BatonConfig, project_dir: Path, make_tmux
 ) -> None:
     """Launch names mcp.json in the launch script, leaving writing it to its writer."""
-    tmux = FakeTmux(PaneInfo(dead=False, pid=111))
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=111)])
     launcher = WorkerLauncher(config, tmux)
 
     launcher.launch(project_dir, "baton-1:worker", "do the thing")
@@ -282,10 +230,11 @@ def test_write_mcp_config_builds_the_url_from_the_configured_port(
 
 
 def test_install_skill_writes_the_packaged_skill_text(
-    config: BatonConfig, project_dir: Path, skill_text: str
+    config: BatonConfig, project_dir: Path, skill_text: str, make_tmux
 ) -> None:
     """install_skill copies the packaged SKILL.md text into the project."""
-    launcher = WorkerLauncher(config, FakeTmux(PaneInfo(dead=False, pid=None)))
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=None)])
+    launcher = WorkerLauncher(config, tmux)
 
     result = launcher.install_skill(project_dir)
 
@@ -294,10 +243,11 @@ def test_install_skill_writes_the_packaged_skill_text(
 
 
 def test_install_skill_overwrites_an_existing_file(
-    config: BatonConfig, project_dir: Path, skill_text: str
+    config: BatonConfig, project_dir: Path, skill_text: str, make_tmux
 ) -> None:
     """install_skill overwrites whatever was previously written there."""
-    launcher = WorkerLauncher(config, FakeTmux(PaneInfo(dead=False, pid=None)))
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=None)])
+    launcher = WorkerLauncher(config, tmux)
     skill_path = project_dir / ".claude" / "skills" / "baton-worker" / "SKILL.md"
     skill_path.parent.mkdir(parents=True)
     skill_path.write_text("stale content", encoding="utf-8")

@@ -1,8 +1,7 @@
 # Baton architecture
 
-This document is for somebody who wants to change baton: its parts, the lifecycle protocol, the
-normal loop, the tmux layout, and the state directory. See [`README.md`](../README.md) for what
-baton is, how to run it, and how to configure it.
+This document is for somebody who wants to change baton: how it is built and what it does. See
+[`README.md`](../README.md) for what baton is, how to run it, and how to configure it.
 
 ## The parts of the system
 
@@ -105,5 +104,5 @@ The state directory holds:
 ## Failure behavior
 
 The normal loop above covers what happens to a `failed` report. Beyond that, baton does not detect
-a worker that exits without reporting, runs no diagnosis worker, and does not reconcile with a
-live worker after a restart.
+a worker that exits without reporting, does not launch a worker to investigate a failure, and does
+not reconcile with a live worker after a restart.

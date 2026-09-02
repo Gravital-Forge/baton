@@ -81,10 +81,10 @@ tmux attach -t =baton-<project directory name>
 The `=` is tmux's exact-match prefix. The worker runs in the pane
 `baton-<project directory name>:worker.0`.
 
-## Failure behavior
+## After a restart
 
-A `failed` report terminates the worker and stops the project in phase `failed`. Baton does not
-detect a worker that exits without reporting. A daemon restarted with a project in `running`,
-`blocked`, or `terminating` refuses to initialize until somebody removes the state file by hand.
+When a restarted daemon refuses to initialize a project, delete `state.json` from the state
+directory by hand. Then initialize the project again.
 
-See [`docs/architecture.md`](docs/architecture.md) for how baton runs the normal loop.
+See "Failure behavior" in [`docs/architecture.md`](docs/architecture.md) for how baton behaves
+when a project fails.

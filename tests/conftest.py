@@ -6,7 +6,7 @@ hands over the default double; a `make_` fixture hands over the class or a
 factory, for a test that scripts its own.
 """
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from functools import partial
 from importlib import resources
@@ -140,6 +140,7 @@ class FakeTmux:
         self._kill_errors = list(kill_errors)
         self.has_session_calls: list[str] = []
         self.created: list[dict[str, object]] = []
+        self.respawn_calls: list[dict[str, object]] = []
         self.pane_info_calls: list[str] = []
         self.signals: list[tuple[int, int]] = []
 
@@ -169,6 +170,26 @@ class FakeTmux:
             raise self._create_error
         self.created.append({"session": session, "start_dir": start_dir})
         self.sessions.add(session)
+
+    def respawn_pane(
+        self, target: str, start_dir: Path, env: Mapping[str, str], command: str
+    ) -> None:
+        """Record the call instead of respawning a real pane.
+
+        Args:
+            target: The pane target that was respawned.
+            start_dir: The directory the respawned pane starts in.
+            env: The environment mapping that was passed.
+            command: The command string that was passed.
+        """
+        self.respawn_calls.append(
+            {
+                "target": target,
+                "start_dir": start_dir,
+                "env": dict(env),
+                "command": command,
+            }
+        )
 
     def pane_info(self, target: str) -> PaneInfo:
         """Record the query and return the next scripted `PaneInfo`.
