@@ -6,7 +6,11 @@ baton is, how to run it, and how to configure it.
 
 ## The parts of the system
 
-Each part of baton lives in its own module.
+Baton is five parts: the daemon, the tmux session it supervises, the Claude Code workers the daemon
+runs one at a time, the project directory those workers share, and the worker protocol skill that
+tells a worker how to talk to the daemon.
+
+The daemon itself is built from smaller modules, each holding one part of its job.
 
 - **Configuration** (`baton/config.py`) is a frozen value object, read from the environment once
   at startup. The readme lists the variables it reads and their defaults.
@@ -16,8 +20,8 @@ Each part of baton lives in its own module.
   code that runs a subprocess. The launcher writes a worker its prompt file and its launch script,
   and respawns the pane on that script. It also installs the worker protocol skill in the project,
   once, when the project is initialized.
-- **The worker preamble** (`baton/prompts.py`) is the short text every worker is launched with. It
-  is what sends a worker to the installed skill and tells it to carry its own id.
+- **The worker preamble** (`baton/prompts.py`) is the short text every worker is launched with. The
+  tmux layout section describes what it sends the worker to do.
 - **The supervisor engine** (`baton/engine.py`) is the state machine. It holds the project's
   phase, decides what a report means, and owns the grace period and the termination sequence. It
   reaches tmux and `claude` only through the adapters above, so it can be tested without either.
@@ -47,13 +51,17 @@ refuses every later report from that worker.
 
 A worker meets these rules twice. `baton/skill/SKILL.md` is the protocol it follows for the whole
 session, and the launcher installs it in the project at `.claude/skills/baton-worker/SKILL.md`. The
-rules in full, including the order they are checked in, are the description of the
-`report_lifecycle` tool, which a worker reads before it calls it. Change one and change the other.
+skill and the `report_lifecycle` tool description carry these rules to the worker, and a worker
+reads the tool description before it calls the tool. Change one and change the other.
 
 ## The normal loop
 
 One daemon supervises one project at a time. `initialize_project` refuses to start a new project
 while the current one is running, blocked, or terminating.
+
+A daemon that starts and finds `state.json` in one of those phases refuses `initialize_project` the
+same way, until somebody removes that file by hand. That is also what a daemon stopped mid-handoff
+leaves behind: the worker keeps running, and the state file still says `terminating`.
 
 Baton logs the loop as a sequence of events in `events.jsonl`.
 
@@ -61,15 +69,16 @@ Baton logs the loop as a sequence of events in `events.jsonl`.
 the project to `running`. The worker calls `report_status` as it goes, and each call is a
 `milestone` event.
 
-A `success` report starts the handoff. Baton logs a `lifecycle` event, then a `phase` event moving
-the project to `terminating`. It waits the grace period, so the worker can finish its own shutdown.
-It sends `SIGTERM`, and `SIGKILL` after that if the pane outlives the termination timeout. It logs
-a `terminate` event. Then it launches the next worker with the prompt the last one wrote — a
-`launch` event, and a `phase` event back to `running`.
+A `success`, `completed`, or `failed` report is terminal, and all three terminate the worker the
+same way. Baton logs a `lifecycle` event, then a `phase` event moving the project to `terminating`.
+It waits the grace period, so the worker can finish its own shutdown. It sends `SIGTERM`, and
+`SIGKILL` after that if the pane outlives the termination timeout. It logs a `terminate` event.
 
-A `completed` report ends the loop in phase `completed`. A `failed` report terminates the worker
-the same way a `success` does, and stops the project in phase `failed`. A `blocked` report moves
-the project to phase `blocked` and leaves the worker alive for the human who must unblock it.
+What baton does next depends on which report it was. A `success` report launches the next worker
+with the prompt the last one wrote — a `launch` event, and a `phase` event back to `running`. A
+`completed` report stops the project in phase `completed`. A `failed` report stops the project in
+phase `failed`. A `blocked` report skips termination: it moves the project to phase `blocked` and
+leaves the worker alive for the human who must unblock it.
 
 ## The tmux layout
 
@@ -93,13 +102,8 @@ The state directory holds:
 - `workers/<worker id>/` — the `prompt.md` a worker was launched with, and the `launch.sh` that
   ran it. These files stay after the worker ends, as the record of what ran.
 
-## What is not built
+## Failure behavior
 
-Baton runs the normal loop only. It does not notice a worker that has vanished, it runs no
-diagnosis worker, it has no recovery loop, and it does not reconcile with a live worker after a
-restart. A reader who knows the design otherwise assumes those paths are here.
-
-A daemon that starts and finds `state.json` in phase `running`, `blocked`, or `terminating`
-refuses `initialize_project` until somebody removes that file by hand. That is also what happens
-when the daemon stops in the middle of a handoff: the worker keeps running, and the state file
-still says `terminating`.
+The normal loop above covers what happens to a `failed` report. Beyond that, baton does not detect
+a worker that exits without reporting, runs no diagnosis worker, and does not reconcile with a
+live worker after a restart.
