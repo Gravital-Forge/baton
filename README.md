@@ -83,8 +83,13 @@ The `=` is tmux's exact-match prefix. The worker runs in the pane
 
 ## After a restart
 
-When a restarted daemon refuses to initialize a project, delete `state.json` from the state
-directory by hand. Then initialize the project again.
+When `initialize_project` refuses because a stopped daemon left `state.json` behind, clear it:
 
-See "Failure behavior" in [`docs/architecture.md`](docs/architecture.md) for how baton behaves
-when a project fails.
+1. Stop the daemon.
+2. Delete `state.json` from the state directory.
+3. Start the daemon.
+4. Initialize the project again. This kills any worker still running from before the restart,
+   without giving it a chance to report.
+
+See "The normal loop" in [`docs/architecture.md`](docs/architecture.md) for why the daemon
+refuses.
