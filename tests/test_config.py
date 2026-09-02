@@ -8,9 +8,26 @@ import pytest
 from baton.config import BatonConfig
 
 
+def _write_stub_binaries(directory: Path) -> Path:
+    """Write executable `claude` and `tmux` stubs into a directory.
+
+    Args:
+        directory: The directory to create and fill.
+
+    Returns:
+        The directory, so a fixture can return the call.
+    """
+    directory.mkdir(parents=True)
+    for name in ("claude", "tmux"):
+        stub = directory / name
+        stub.write_text("#!/bin/sh\n")
+        stub.chmod(0o755)
+    return directory
+
+
 @pytest.fixture
 def bin_dir(tmp_path: Path) -> Path:
-    """Create a directory holding executable `claude` and `tmux` stub binaries.
+    """Create a directory of stub binaries to use as the injected PATH.
 
     Args:
         tmp_path: Pytest's per-test temporary directory.
@@ -18,13 +35,23 @@ def bin_dir(tmp_path: Path) -> Path:
     Returns:
         The directory containing the two stub binaries.
     """
-    directory = tmp_path / "bin"
-    directory.mkdir()
-    for name in ("claude", "tmux"):
-        stub = directory / name
-        stub.write_text("#!/bin/sh\n")
-        stub.chmod(0o755)
-    return directory
+    return _write_stub_binaries(tmp_path / "bin")
+
+
+@pytest.fixture
+def off_path_dir(tmp_path: Path) -> Path:
+    """Create a directory of stub binaries that is never put on PATH.
+
+    An override test that pointed at a binary on PATH would pass even if the
+    override were ignored, so the override targets live here instead.
+
+    Args:
+        tmp_path: Pytest's per-test temporary directory.
+
+    Returns:
+        The directory containing the two stub binaries.
+    """
+    return _write_stub_binaries(tmp_path / "off-path")
 
 
 def test_defaults_come_from_the_documented_values(bin_dir: Path) -> None:
@@ -41,10 +68,12 @@ def test_defaults_come_from_the_documented_values(bin_dir: Path) -> None:
     assert config.poll_interval == 2
 
 
-def test_every_field_reads_its_environment_variable(bin_dir: Path) -> None:
+def test_every_field_reads_its_environment_variable(
+    bin_dir: Path, off_path_dir: Path
+) -> None:
     """Every field takes its value from its matching environment variable."""
-    claude_bin = bin_dir / "claude"
-    tmux_bin = bin_dir / "tmux"
+    claude_bin = off_path_dir / "claude"
+    tmux_bin = off_path_dir / "tmux"
     environ = {
         "PATH": str(bin_dir),
         "BATON_HOST": "192.0.2.10",
@@ -79,16 +108,34 @@ def test_state_dir_expands_a_tilde(bin_dir: Path) -> None:
 
 
 def test_relative_binary_path_becomes_absolute(
-    bin_dir: Path, monkeypatch: pytest.MonkeyPatch
+    bin_dir: Path, off_path_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A relative BATON_CLAUDE_BIN resolves to an absolute path."""
-    monkeypatch.chdir(bin_dir.parent)
-    environ = {"PATH": str(bin_dir), "BATON_CLAUDE_BIN": "bin/claude"}
+    """A relative BATON_CLAUDE_BIN becomes an absolute path."""
+    monkeypatch.chdir(off_path_dir.parent)
+    environ = {"PATH": str(bin_dir), "BATON_CLAUDE_BIN": "off-path/claude"}
 
     config = BatonConfig.from_env(environ)
 
-    assert config.claude_bin == bin_dir / "claude"
+    assert config.claude_bin == off_path_dir / "claude"
     assert config.claude_bin.is_absolute()
+
+
+def test_a_binary_symlink_is_not_followed(tmp_path: Path) -> None:
+    """A launcher symlink is kept rather than replaced by its target.
+
+    The claude launcher is a symlink into a versioned install directory, so
+    following it would pin baton to one version.
+    """
+    versioned = _write_stub_binaries(tmp_path / "versions" / "1.0")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("claude", "tmux"):
+        (bin_dir / name).symlink_to(versioned / name)
+
+    config = BatonConfig.from_env({"PATH": str(bin_dir)})
+
+    assert config.claude_bin == bin_dir / "claude"
+    assert config.tmux_bin == bin_dir / "tmux"
 
 
 def test_missing_claude_binary_raises_value_error(bin_dir: Path) -> None:
@@ -105,6 +152,14 @@ def test_missing_tmux_binary_raises_value_error(bin_dir: Path) -> None:
 
     with pytest.raises(ValueError, match="tmux"):
         BatonConfig.from_env({"PATH": str(bin_dir)})
+
+
+def test_a_non_integer_interval_names_its_variable(bin_dir: Path) -> None:
+    """A non-integer interval raises ValueError naming the variable."""
+    environ = {"PATH": str(bin_dir), "BATON_PORT": "not-a-number"}
+
+    with pytest.raises(ValueError, match="BATON_PORT"):
+        BatonConfig.from_env(environ)
 
 
 def test_from_env_reads_the_process_environment_by_default(

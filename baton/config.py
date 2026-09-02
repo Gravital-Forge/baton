@@ -33,11 +33,14 @@ def _read_int(environ: Mapping[str, str], key: str, default: int) -> int:
     value = environ.get(key)
     if value is None:
         return default
-    return int(value)
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{key} must be an integer, got {value!r}") from exc
 
 
 def _resolve_binary(environ: Mapping[str, str], key: str, name: str) -> Path:
-    """Resolve the absolute path to an executable, preferring an override.
+    """Find the absolute path to an executable, preferring an override.
 
     Args:
         environ: The environment to read from.
@@ -46,7 +49,8 @@ def _resolve_binary(environ: Mapping[str, str], key: str, name: str) -> Path:
             absent or empty.
 
     Returns:
-        The absolute path to the resolved executable.
+        The absolute path to the executable, with any symlink left
+        unfollowed.
 
     Raises:
         ValueError: If neither the environment variable nor a PATH search
@@ -85,8 +89,8 @@ class BatonConfig:
             ``BATON_TMUX_BIN``. Defaults to the first ``tmux`` found on
             ``PATH``.
         grace_period: Seconds to wait after a worker's terminal report
-            before terminating it, so it can finish writing and flush its
-            logs. Read from ``BATON_GRACE_PERIOD``. Defaults to ``20``.
+            before terminating it. Read from ``BATON_GRACE_PERIOD``.
+            Defaults to ``20``.
         termination_timeout: Seconds to wait after ``SIGTERM`` for a pane to
             go dead before sending ``SIGKILL``. Read from
             ``BATON_TERMINATION_TIMEOUT``. Defaults to ``5``.
@@ -114,6 +118,10 @@ class BatonConfig:
         Returns:
             A config populated from ``environ``, falling back to the
             documented defaults for any variable that is absent.
+
+        Raises:
+            ValueError: If an interval variable holds something that is not
+                an integer, or if either binary cannot be found.
         """
         if environ is None:
             environ = os.environ
