@@ -10,7 +10,7 @@ from pathlib import Path
 from mcp.server.mcpserver.exceptions import ToolError
 
 from baton.engine import Supervisor, SupervisorError
-from baton.models import Event, LifecycleReport, LifecycleState, ProjectState
+from baton.models import LifecycleState, ProjectState
 
 RECENT_EVENT_COUNT = 50
 
@@ -25,45 +25,6 @@ def _worker_id(state: ProjectState) -> str | None:
         The current worker's id, or None when no worker is running.
     """
     return None if state.worker is None else state.worker.worker_id
-
-
-def _serialize_report(report: LifecycleReport | None) -> dict[str, object] | None:
-    """Shape a lifecycle report for the wire.
-
-    Args:
-        report: The report to serialize, or None when nothing has been
-            reported yet.
-
-    Returns:
-        None when report is None. Otherwise a mapping of its state (as
-        the enum's value string), its message, and its next prompt.
-    """
-    if report is None:
-        return None
-    return {
-        "state": report.state.value,
-        "message": report.message,
-        "next_prompt": report.next_prompt,
-    }
-
-
-def _serialize_event(event: Event) -> dict[str, object]:
-    """Shape an event for the wire.
-
-    Args:
-        event: The event to serialize.
-
-    Returns:
-        A mapping of the event's timestamp (as an ISO-8601 string), its
-        kind (as the enum's value string), its worker id, and its
-        payload, unchanged.
-    """
-    return {
-        "timestamp": event.timestamp.isoformat(),
-        "kind": event.kind.value,
-        "worker_id": event.worker_id,
-        "payload": event.payload,
-    }
 
 
 class BatonTools:
@@ -234,9 +195,10 @@ class BatonTools:
         """
         state = self._supervisor.snapshot()
         events = self._supervisor.recent_events(RECENT_EVENT_COUNT)
+        last_report = state.last_report
         return {
             "phase": state.phase.value,
             "worker_id": _worker_id(state),
-            "last_report": _serialize_report(state.last_report),
-            "events": [_serialize_event(event) for event in events],
+            "last_report": None if last_report is None else last_report.to_dict(),
+            "events": [event.to_dict() for event in events],
         }

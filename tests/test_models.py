@@ -233,6 +233,30 @@ def test_is_terminal_matches_the_state(state: LifecycleState, expected: bool) ->
     assert report.is_terminal is expected
 
 
+def test_lifecycle_report_to_dict_maps_every_field() -> None:
+    """to_dict maps a report to its state value, message, and next prompt."""
+    report = LifecycleReport(
+        state=LifecycleState.success, message="done", next_prompt="next"
+    )
+
+    assert report.to_dict() == {
+        "state": "success",
+        "message": "done",
+        "next_prompt": "next",
+    }
+
+
+def test_lifecycle_report_to_dict_preserves_absent_fields_as_none() -> None:
+    """to_dict keeps an absent message and next prompt as None."""
+    report = LifecycleReport(state=LifecycleState.running)
+
+    assert report.to_dict() == {
+        "state": "running",
+        "message": None,
+        "next_prompt": None,
+    }
+
+
 def test_worker_record_holds_given_fields(tmp_path: Path) -> None:
     """WorkerRecord stores every field exactly as constructed."""
     launched_at = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
@@ -262,6 +286,24 @@ def test_worker_record_pane_pid_defaults_to_none(tmp_path: Path) -> None:
     )
 
     assert record.pane_pid is None
+
+
+def test_worker_record_to_dict_maps_every_field(tmp_path: Path) -> None:
+    """to_dict maps a record to its id, path string, ISO time, and pane pid."""
+    prompt_path = tmp_path / "prompt.md"
+    record = WorkerRecord(
+        worker_id="worker-1",
+        prompt_path=prompt_path,
+        launched_at=datetime(2026, 9, 2, 12, 0, tzinfo=UTC),
+        pane_pid=4242,
+    )
+
+    assert record.to_dict() == {
+        "worker_id": "worker-1",
+        "prompt_path": str(prompt_path),
+        "launched_at": "2026-09-02T12:00:00+00:00",
+        "pane_pid": 4242,
+    }
 
 
 def test_project_state_fresh_is_uninitialized() -> None:
@@ -342,6 +384,70 @@ def test_project_state_updated_leaves_the_original_unchanged() -> None:
     assert state.updated_at == original_updated_at
 
 
+def test_project_state_to_dict_maps_every_field(tmp_path: Path) -> None:
+    """to_dict maps a full state, nesting the worker and the last report."""
+    project_path = tmp_path / "project"
+    prompt_path = tmp_path / "prompt.md"
+    state = ProjectState(
+        phase=ProjectPhase.running,
+        project_path=project_path,
+        session_name="baton-project",
+        pane_target="baton-project:0.0",
+        worker=WorkerRecord(
+            worker_id="worker-1",
+            prompt_path=prompt_path,
+            launched_at=datetime(2026, 9, 2, 12, 0, tzinfo=UTC),
+            pane_pid=4242,
+        ),
+        last_report=LifecycleReport(
+            state=LifecycleState.success, message="done", next_prompt="next"
+        ),
+        updated_at=datetime(2026, 9, 2, 12, 5, tzinfo=UTC),
+    )
+
+    assert state.to_dict() == {
+        "phase": "running",
+        "project_path": str(project_path),
+        "session_name": "baton-project",
+        "pane_target": "baton-project:0.0",
+        "worker": {
+            "worker_id": "worker-1",
+            "prompt_path": str(prompt_path),
+            "launched_at": "2026-09-02T12:00:00+00:00",
+            "pane_pid": 4242,
+        },
+        "last_report": {
+            "state": "success",
+            "message": "done",
+            "next_prompt": "next",
+        },
+        "updated_at": "2026-09-02T12:05:00+00:00",
+    }
+
+
+def test_project_state_to_dict_preserves_absent_fields_as_none() -> None:
+    """to_dict keeps an uninitialized state's optional fields as None."""
+    state = ProjectState(
+        phase=ProjectPhase.uninitialized,
+        project_path=None,
+        session_name=None,
+        pane_target=None,
+        worker=None,
+        last_report=None,
+        updated_at=datetime(2026, 9, 2, 12, 0, tzinfo=UTC),
+    )
+
+    assert state.to_dict() == {
+        "phase": "uninitialized",
+        "project_path": None,
+        "session_name": None,
+        "pane_target": None,
+        "worker": None,
+        "last_report": None,
+        "updated_at": "2026-09-02T12:00:00+00:00",
+    }
+
+
 def test_event_holds_given_fields() -> None:
     """Event stores every field exactly as constructed."""
     timestamp = datetime(2026, 9, 2, 12, 0, tzinfo=UTC)
@@ -373,3 +479,20 @@ def test_event_accepts_a_none_worker_id() -> None:
 
     assert event.worker_id is None
     assert event.payload == {}
+
+
+def test_event_to_dict_maps_every_field() -> None:
+    """to_dict maps an event to its ISO timestamp, kind value, worker, payload."""
+    event = Event(
+        timestamp=datetime(2026, 9, 2, 12, 0, tzinfo=UTC),
+        kind=EventKind.launch,
+        worker_id="worker-1",
+        payload={"detail": "started"},
+    )
+
+    assert event.to_dict() == {
+        "timestamp": "2026-09-02T12:00:00+00:00",
+        "kind": "launch",
+        "worker_id": "worker-1",
+        "payload": {"detail": "started"},
+    }

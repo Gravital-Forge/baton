@@ -111,6 +111,19 @@ class LifecycleReport:
             LifecycleState.failed,
         )
 
+    def to_dict(self) -> dict[str, object]:
+        """Shape this report as a JSON-ready mapping.
+
+        Returns:
+            A mapping of the state as the enum's value string, the
+            message, and the next prompt, each None preserved.
+        """
+        return {
+            "state": self.state.value,
+            "message": self.message,
+            "next_prompt": self.next_prompt,
+        }
+
 
 @dataclass(frozen=True)
 class WorkerRecord:
@@ -130,6 +143,20 @@ class WorkerRecord:
     prompt_path: Path
     launched_at: datetime
     pane_pid: int | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        """Shape this record as a JSON-ready mapping.
+
+        Returns:
+            A mapping of the worker id, the prompt path as a string, the
+            launch time as an ISO 8601 string, and the pane pid.
+        """
+        return {
+            "worker_id": self.worker_id,
+            "prompt_path": str(self.prompt_path),
+            "launched_at": self.launched_at.isoformat(),
+            "pane_pid": self.pane_pid,
+        }
 
 
 @dataclass(frozen=True)
@@ -192,6 +219,29 @@ class ProjectState:
         changes.setdefault("updated_at", datetime.now(UTC))
         return dataclasses.replace(self, **changes)
 
+    def to_dict(self) -> dict[str, object]:
+        """Shape this state as a JSON-ready mapping.
+
+        Returns:
+            A mapping of the phase as the enum's value string, the
+            project path as a string, the session name, the pane target,
+            the worker and last report as their own mappings, and
+            updated_at as an ISO 8601 string. Every None is preserved.
+        """
+        return {
+            "phase": self.phase.value,
+            "project_path": (
+                None if self.project_path is None else str(self.project_path)
+            ),
+            "session_name": self.session_name,
+            "pane_target": self.pane_target,
+            "worker": None if self.worker is None else self.worker.to_dict(),
+            "last_report": (
+                None if self.last_report is None else self.last_report.to_dict()
+            ),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
 
 @dataclass(frozen=True)
 class Event:
@@ -211,3 +261,18 @@ class Event:
     kind: EventKind
     worker_id: str | None
     payload: dict[str, object]
+
+    def to_dict(self) -> dict[str, object]:
+        """Shape this event as a JSON-ready mapping.
+
+        Returns:
+            A mapping of the timestamp as an ISO 8601 string, the kind as
+            the enum's value string, the worker id, and the payload,
+            unchanged.
+        """
+        return {
+            "timestamp": self.timestamp.isoformat(),
+            "kind": self.kind.value,
+            "worker_id": self.worker_id,
+            "payload": self.payload,
+        }

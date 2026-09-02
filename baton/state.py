@@ -40,25 +40,6 @@ def _decode_time(value: object) -> datetime:
     return datetime.fromisoformat(value)
 
 
-def _encode_worker(worker: WorkerRecord | None) -> Mapping[str, object] | None:
-    """Encode a WorkerRecord as a JSON-ready mapping.
-
-    Args:
-        worker: The worker record to encode, or None.
-
-    Returns:
-        A mapping with the pinned worker keys, or None when worker is None.
-    """
-    if worker is None:
-        return None
-    return {
-        "worker_id": worker.worker_id,
-        "prompt_path": str(worker.prompt_path),
-        "launched_at": worker.launched_at.isoformat(),
-        "pane_pid": worker.pane_pid,
-    }
-
-
 def _decode_worker(raw: Mapping[str, object] | None) -> WorkerRecord | None:
     """Decode a WorkerRecord from its JSON mapping.
 
@@ -76,24 +57,6 @@ def _decode_worker(raw: Mapping[str, object] | None) -> WorkerRecord | None:
         launched_at=_decode_time(raw["launched_at"]),
         pane_pid=raw["pane_pid"],
     )
-
-
-def _encode_report(report: LifecycleReport | None) -> Mapping[str, object] | None:
-    """Encode a LifecycleReport as a JSON-ready mapping.
-
-    Args:
-        report: The lifecycle report to encode, or None.
-
-    Returns:
-        A mapping with the pinned report keys, or None when report is None.
-    """
-    if report is None:
-        return None
-    return {
-        "state": report.state.value,
-        "message": report.message,
-        "next_prompt": report.next_prompt,
-    }
 
 
 def _decode_report(raw: Mapping[str, object] | None) -> LifecycleReport | None:
@@ -114,26 +77,6 @@ def _decode_report(raw: Mapping[str, object] | None) -> LifecycleReport | None:
     )
 
 
-def _encode_state(state: ProjectState) -> Mapping[str, object]:
-    """Encode a ProjectState as a JSON-ready mapping.
-
-    Args:
-        state: The project state to encode.
-
-    Returns:
-        A mapping with the pinned state.json keys, in the pinned order.
-    """
-    return {
-        "phase": state.phase.value,
-        "project_path": None if state.project_path is None else str(state.project_path),
-        "session_name": state.session_name,
-        "pane_target": state.pane_target,
-        "worker": _encode_worker(state.worker),
-        "last_report": _encode_report(state.last_report),
-        "updated_at": state.updated_at.isoformat(),
-    }
-
-
 def _decode_state(raw: Mapping[str, object]) -> ProjectState:
     """Decode a ProjectState from its JSON mapping.
 
@@ -152,23 +95,6 @@ def _decode_state(raw: Mapping[str, object]) -> ProjectState:
         last_report=_decode_report(raw["last_report"]),
         updated_at=_decode_time(raw["updated_at"]),
     )
-
-
-def _encode_event(event: Event) -> Mapping[str, object]:
-    """Encode an Event as a JSON-ready mapping.
-
-    Args:
-        event: The event to encode.
-
-    Returns:
-        A mapping with the pinned event keys, in the pinned order.
-    """
-    return {
-        "timestamp": event.timestamp.isoformat(),
-        "kind": event.kind.value,
-        "worker_id": event.worker_id,
-        "payload": event.payload,
-    }
 
 
 def _decode_event(raw: Mapping[str, object]) -> Event:
@@ -234,7 +160,7 @@ class StateStore:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         temp_path = self.state_dir / "state.json.tmp"
         temp_path.write_text(
-            json.dumps(_encode_state(state), indent=2) + "\n", encoding="utf-8"
+            json.dumps(state.to_dict(), indent=2) + "\n", encoding="utf-8"
         )
         try:
             temp_path.replace(self.state_path)
@@ -267,7 +193,7 @@ class StateStore:
             payload=dict(payload),
         )
         with self.events_path.open("a", encoding="utf-8") as events_file:
-            events_file.write(json.dumps(_encode_event(event)) + "\n")
+            events_file.write(json.dumps(event.to_dict()) + "\n")
         return event
 
     def recent_events(self, count: int) -> list[Event]:
