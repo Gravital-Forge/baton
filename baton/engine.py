@@ -207,32 +207,36 @@ class Supervisor:
                 },
             )
 
-            if report.state == LifecycleState.blocked:
-                self._commit(
-                    self._state.updated(phase=ProjectPhase.blocked, last_report=report)
-                )
-                return
-
-            if report.is_terminal:
-                worker = self._state.worker
-                self._commit(
-                    self._state.updated(
-                        phase=ProjectPhase.terminating, last_report=report
+            match report.state:
+                case LifecycleState.blocked:
+                    self._commit(
+                        self._state.updated(
+                            phase=ProjectPhase.blocked, last_report=report
+                        )
                     )
-                )
-                self._finish_task = asyncio.create_task(self._finish(report, worker))
-                return
-
-            if (
-                report.state == LifecycleState.running
-                and self._state.phase == ProjectPhase.blocked
-            ):
-                self._commit(
-                    self._state.updated(phase=ProjectPhase.running, last_report=report)
-                )
-                return
-
-            self._commit(self._state.updated(last_report=report))
+                case (
+                    LifecycleState.success
+                    | LifecycleState.completed
+                    | LifecycleState.failed
+                ):
+                    worker = self._state.worker
+                    self._commit(
+                        self._state.updated(
+                            phase=ProjectPhase.terminating, last_report=report
+                        )
+                    )
+                    self._finish_task = asyncio.create_task(
+                        self._finish(report, worker)
+                    )
+                case LifecycleState.running:
+                    if self._state.phase == ProjectPhase.blocked:
+                        self._commit(
+                            self._state.updated(
+                                phase=ProjectPhase.running, last_report=report
+                            )
+                        )
+                    else:
+                        self._commit(self._state.updated(last_report=report))
 
     def snapshot(self) -> ProjectState:
         """Return the current in-memory project state.

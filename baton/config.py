@@ -54,18 +54,22 @@ def _resolve_binary(environ: Mapping[str, str], key: str, name: str) -> Path:
 
     Raises:
         ValueError: If the environment variable is set to a value that does
-            not resolve to an executable, or if it is absent and a PATH
-            search does not locate the executable.
+            not resolve to an executable, or if it is absent or empty and a
+            PATH search does not locate the executable.
     """
+    search_path = environ.get("PATH", "")
     value = environ.get(key)
     if value:
-        found = shutil.which(value)
+        found = shutil.which(value, path=search_path)
+        if not found:
+            raise ValueError(f"{key}={value!r} is not an executable file")
     else:
-        found = shutil.which(name, path=environ.get("PATH", ""))
-    if not found:
-        raise ValueError(
-            f"cannot find the {name!r} binary on PATH; set {key} to its absolute path"
-        )
+        found = shutil.which(name, path=search_path)
+        if not found:
+            raise ValueError(
+                f"cannot find the {name!r} binary on PATH; "
+                f"set {key} to its absolute path"
+            )
     # The claude launcher is a symlink into a versioned install directory, so
     # resolving it would pin baton to whatever version is installed today and
     # defeat the installer's upgrade path. absolute() is enough: it gives the

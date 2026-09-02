@@ -84,7 +84,7 @@ leaves the worker alive for the human who must unblock it.
 
 A `running` report makes one transition, and only this one. While the project is `blocked`, it
 returns the project to phase `running` — a `phase` event from `blocked` to `running` — and leaves
-the worker alive. In every other phase baton records the report and moves nothing.
+the worker alive. From phase `running` baton records the report and moves nothing.
 
 ## The tmux layout
 

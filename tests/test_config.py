@@ -1,6 +1,7 @@
 """Tests for baton.config."""
 
 import dataclasses
+import re
 from pathlib import Path
 
 import pytest
@@ -124,10 +125,23 @@ def test_explicit_binary_path_that_does_not_exist_raises_value_error(
     tmp_path: Path,
 ) -> None:
     """An explicit BATON_CLAUDE_BIN that does not exist raises ValueError naming it."""
-    environ = {"BATON_CLAUDE_BIN": str(tmp_path / "missing-claude")}
+    missing = str(tmp_path / "missing-claude")
+    environ = {"BATON_CLAUDE_BIN": missing}
 
-    with pytest.raises(ValueError, match="claude"):
+    expected = re.escape(f"BATON_CLAUDE_BIN={missing!r} is not an executable file")
+    with pytest.raises(ValueError, match=expected):
         BatonConfig.from_env(environ)
+
+
+def test_a_bare_override_name_is_searched_on_the_injected_path(
+    off_path_dir: Path,
+) -> None:
+    """A bare name in BATON_CLAUDE_BIN is looked up on the injected PATH."""
+    environ = {"PATH": str(off_path_dir), "BATON_CLAUDE_BIN": "claude"}
+
+    config = BatonConfig.from_env(environ)
+
+    assert config.claude_bin == off_path_dir / "claude"
 
 
 def test_explicit_binary_path_that_exists_is_accepted(off_path_dir: Path) -> None:

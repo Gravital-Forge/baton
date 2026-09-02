@@ -452,7 +452,7 @@ async def test_blocked_report_sets_phase_blocked_and_keeps_the_worker(
 
 @pytest.mark.anyio
 async def test_blocked_worker_reporting_running_commits_phase_back_to_running(
-    config: BatonConfig, supervisor: Supervisor, project_dir: Path
+    config: BatonConfig, supervisor: Supervisor, tmux: FakeTmux, project_dir: Path
 ) -> None:
     """A running report from a blocked project commits the phase back to running."""
     result = await supervisor.initialize(project_dir, "start here")
@@ -483,6 +483,7 @@ async def test_blocked_worker_reporting_running_commits_phase_back_to_running(
     phase_event = events[-1]
     assert phase_event.payload["from"] == ProjectPhase.blocked.value
     assert phase_event.payload["to"] == ProjectPhase.running.value
+    assert tmux.signals == []
 
 
 @pytest.mark.anyio

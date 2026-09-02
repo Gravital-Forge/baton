@@ -30,7 +30,8 @@ The states:
 - **`completed`** — the whole project is done, not just this task.
 - **`failed`** — you could not complete the task. Say what went wrong.
 - **`blocked`** — you need a human's input to continue. You stay alive for that
-  human, and you report again once the work can move.
+  human, and you report `running` once the work can move, which tells baton you
+  are working again and returns the project to `running`.
 
 Every report except `running` carries a message that says what happened. Baton
 rejects a report without one.

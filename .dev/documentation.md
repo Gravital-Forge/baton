@@ -1,7 +1,7 @@
 # documentation binding
 
 The workspace root's `documentation` topic says where a work item in flight keeps its working
-documents, and this binding does not restate it.
+documents.
 
 Kept documentation is `README.md` and `docs/architecture.md`. The readme says what baton is, how to
 run it, and how to configure it. The architecture document says how it works. Update a kept document
