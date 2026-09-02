@@ -32,6 +32,9 @@ The states:
 - **`blocked`** — you need a human's input to continue. You stay alive for that
   human, and you report again once the work can move.
 
+Every report except `running` carries a message that says what happened. Baton
+rejects a report without one.
+
 A terminal report is final. After you send one, do no new work and do not revise
 your handoff. Baton ends your session shortly after.
 

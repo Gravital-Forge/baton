@@ -71,7 +71,7 @@ def test_has_session_returns_true_on_zero_exit() -> None:
     result = adapter.has_session("baton-1")
 
     assert result is True
-    assert runner.calls == [[TMUX, "has-session", "-t", "baton-1"]]
+    assert runner.calls == [[TMUX, "has-session", "-t", "=baton-1"]]
 
 
 def test_has_session_returns_false_on_nonzero_exit() -> None:
@@ -82,7 +82,17 @@ def test_has_session_returns_false_on_nonzero_exit() -> None:
     result = adapter.has_session("baton-1")
 
     assert result is False
-    assert runner.calls == [[TMUX, "has-session", "-t", "baton-1"]]
+    assert runner.calls == [[TMUX, "has-session", "-t", "=baton-1"]]
+
+
+def test_a_target_already_marked_exact_is_left_alone() -> None:
+    """A target that already carries tmux's `=` prefix is passed through as is."""
+    runner = FakeRunner([_completed([], 0)])
+    adapter = TmuxAdapter(TMUX_BIN, runner)
+
+    adapter.has_session("=baton-1")
+
+    assert runner.calls == [[TMUX, "has-session", "-t", "=baton-1"]]
 
 
 def test_create_session_issues_new_session_then_set_option() -> None:
@@ -109,7 +119,7 @@ def test_create_session_issues_new_session_then_set_option() -> None:
             "set-option",
             "-w",
             "-t",
-            "baton-1:worker",
+            "=baton-1:worker",
             "remain-on-exit",
             "on",
         ],
@@ -143,7 +153,7 @@ def test_respawn_pane_issues_one_call_with_env_and_command_last() -> None:
             "respawn-pane",
             "-k",
             "-t",
-            "baton-1:worker",
+            "=baton-1:worker",
             "-c",
             "/work/baton-1",
             "-e",
@@ -178,7 +188,7 @@ def test_pane_info_parses_a_live_pane() -> None:
             "display-message",
             "-p",
             "-t",
-            "baton-1:worker",
+            "=baton-1:worker",
             "#{pane_dead} #{pane_pid}",
         ]
     ]

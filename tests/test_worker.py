@@ -69,7 +69,11 @@ class FakeTmux:
 
 
 def _build_config(
-    tmp_path: Path, *, state_dir: Path | None = None, port: int = 8910
+    tmp_path: Path,
+    *,
+    state_dir: Path | None = None,
+    port: int = 8910,
+    claude_bin: Path = Path("/opt/claude/bin/claude"),
 ) -> BatonConfig:
     """Build a `BatonConfig` for tests, without touching a real binary.
 
@@ -79,6 +83,7 @@ def _build_config(
         state_dir: The state directory to use. Defaults to
             `tmp_path / "state"`.
         port: The port to configure. Defaults to `8910`.
+        claude_bin: The claude binary path to configure.
 
     Returns:
         A `BatonConfig` usable without a real `claude` or `tmux` binary.
@@ -87,11 +92,24 @@ def _build_config(
         host="127.0.0.1",
         port=port,
         state_dir=state_dir if state_dir is not None else tmp_path / "state",
-        claude_bin=Path("/opt/claude/bin/claude"),
+        claude_bin=claude_bin,
         tmux_bin=Path("/usr/bin/tmux"),
         grace_period=20,
         termination_timeout=5,
         poll_interval=2,
+    )
+
+
+def _packaged_skill_text() -> str:
+    """Read the skill file baton ships, the way baton reads it at runtime.
+
+    Returns:
+        The packaged SKILL.md text.
+    """
+    return (
+        resources.files("baton")
+        .joinpath("skill", "SKILL.md")
+        .read_text(encoding="utf-8")
     )
 
 
@@ -163,7 +181,7 @@ def test_launch_writes_the_prompt_text_to_prompt_md(
 def test_launch_script_matches_the_pinned_template_line_by_line(
     config: BatonConfig, project_path: Path
 ) -> None:
-    """launch.sh matches the pinned six-line template exactly, line by line."""
+    """launch.sh matches the pinned template exactly, line by line."""
     tmux = FakeTmux(PaneInfo(dead=False, pid=111))
     launcher = WorkerLauncher(config, tmux)
 
@@ -195,20 +213,23 @@ def test_launch_script_is_written_with_mode_0o755(
     assert launch_script.stat().st_mode & 0o777 == 0o755
 
 
-def test_launch_script_quotes_a_state_dir_containing_a_space(
+def test_launch_script_quotes_every_path_containing_a_space(
     tmp_path: Path, project_path: Path
 ) -> None:
-    """A state_dir with a space is shell-quoted in the mcp-config argument."""
+    """Paths with a space are shell-quoted wherever launch.sh names them."""
     state_dir = tmp_path / "state dir"
-    config = _build_config(tmp_path, state_dir=state_dir)
+    claude_bin = tmp_path / "claude code" / "claude"
+    config = _build_config(tmp_path, state_dir=state_dir, claude_bin=claude_bin)
     tmux = FakeTmux(PaneInfo(dead=False, pid=111))
     launcher = WorkerLauncher(config, tmux)
 
     record = launcher.launch(project_path, "baton-1:worker", "do the thing")
 
-    launch_script = state_dir / "workers" / record.worker_id / "launch.sh"
-    script_text = launch_script.read_text(encoding="utf-8")
+    worker_dir = state_dir / "workers" / record.worker_id
+    script_text = (worker_dir / "launch.sh").read_text(encoding="utf-8")
+    assert shlex.quote(str(claude_bin)) in script_text
     assert shlex.quote(str(state_dir / "mcp.json")) in script_text
+    assert shlex.quote(str(worker_dir / "prompt.md")) in script_text
 
 
 def test_launch_script_uses_the_shell_quoted_worker_preamble(
@@ -363,11 +384,7 @@ def test_install_skill_writes_the_packaged_skill_text(
 ) -> None:
     """install_skill copies the packaged SKILL.md text into the project."""
     launcher = WorkerLauncher(config, FakeTmux(PaneInfo(dead=False, pid=None)))
-    expected_text = (
-        resources.files("baton")
-        .joinpath("skill", "SKILL.md")
-        .read_text(encoding="utf-8")
-    )
+    expected_text = _packaged_skill_text()
 
     result = launcher.install_skill(project_path)
 
@@ -383,11 +400,7 @@ def test_install_skill_overwrites_an_existing_file(
     skill_path = project_path / ".claude" / "skills" / "baton-worker" / "SKILL.md"
     skill_path.parent.mkdir(parents=True)
     skill_path.write_text("stale content", encoding="utf-8")
-    expected_text = (
-        resources.files("baton")
-        .joinpath("skill", "SKILL.md")
-        .read_text(encoding="utf-8")
-    )
+    expected_text = _packaged_skill_text()
 
     result = launcher.install_skill(project_path)
 

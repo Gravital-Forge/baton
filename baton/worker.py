@@ -35,6 +35,11 @@ class WorkerLauncher:
         self._config = config
         self._tmux = tmux
 
+    @property
+    def _mcp_config_path(self) -> Path:
+        """The shared MCP config file every worker's launch script points at."""
+        return self._config.state_dir / "mcp.json"
+
     def launch(self, project_path: Path, pane_target: str, prompt: str) -> WorkerRecord:
         """Launch a worker into the given pane and return its record.
 
@@ -53,7 +58,7 @@ class WorkerLauncher:
         prompt_path = worker_dir / "prompt.md"
         prompt_path.write_text(prompt, encoding="utf-8")
 
-        mcp_config_path = self._config.state_dir / "mcp.json"
+        mcp_config_path = self._mcp_config_path
         if not mcp_config_path.exists():
             self.write_mcp_config()
 
@@ -115,7 +120,7 @@ class WorkerLauncher:
             The path the config was written to.
         """
         self._config.state_dir.mkdir(parents=True, exist_ok=True)
-        mcp_config_path = self._config.state_dir / "mcp.json"
+        mcp_config_path = self._mcp_config_path
         url = f"http://{self._config.host}:{self._config.port}/sse"
         config = {"mcpServers": {"baton": {"type": "sse", "url": url}}}
         mcp_config_path.write_text(

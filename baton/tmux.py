@@ -43,6 +43,22 @@ def _run(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _exact_target(target: str) -> str:
+    """Prefix a tmux target so its session name is matched exactly.
+
+    Args:
+        target: A tmux target, such as `"baton-app"` or
+            `"baton-app:worker.0"`.
+
+    Returns:
+        The target with a leading `=`. tmux otherwise accepts a name
+        prefix or an fnmatch pattern, so `baton-app` would also resolve to
+        a leftover `baton-app-api` session — and `respawn-pane -k` would
+        kill that project's pane.
+    """
+    return target if target.startswith("=") else f"={target}"
+
+
 def _parse_pane_info(stdout: str) -> PaneInfo:
     """Parse `display-message`'s `#{pane_dead} #{pane_pid}` output.
 
@@ -74,7 +90,7 @@ class TmuxAdapter:
             runner: The callable used to run each command. Defaults to a
                 wrapper around `subprocess.run`.
         """
-        self._tmux_bin = tmux_bin
+        self._tmux = str(tmux_bin)
         self._runner = runner if runner is not None else _run
 
     def has_session(self, session: str) -> bool:
@@ -87,8 +103,7 @@ class TmuxAdapter:
             `True` when `has-session` exits zero, `False` otherwise. A
             non-zero exit here means the session is absent, not an error.
         """
-        tmux = str(self._tmux_bin)
-        result = self._runner([tmux, "has-session", "-t", session])
+        result = self._runner([self._tmux, "has-session", "-t", _exact_target(session)])
         return result.returncode == 0
 
     def create_session(self, session: str, start_dir: Path) -> None:
@@ -102,10 +117,9 @@ class TmuxAdapter:
             TmuxError: If either the `new-session` or the `set-option` call
                 exits non-zero.
         """
-        tmux = str(self._tmux_bin)
         self._run_checked(
             [
-                tmux,
+                self._tmux,
                 "new-session",
                 "-d",
                 "-s",
@@ -118,11 +132,11 @@ class TmuxAdapter:
         )
         self._run_checked(
             [
-                tmux,
+                self._tmux,
                 "set-option",
                 "-w",
                 "-t",
-                f"{session}:worker",
+                _exact_target(f"{session}:worker"),
                 "remain-on-exit",
                 "on",
             ]
@@ -147,8 +161,15 @@ class TmuxAdapter:
         Raises:
             TmuxError: If the `respawn-pane` call exits non-zero.
         """
-        tmux = str(self._tmux_bin)
-        argv = [tmux, "respawn-pane", "-k", "-t", target, "-c", str(start_dir)]
+        argv = [
+            self._tmux,
+            "respawn-pane",
+            "-k",
+            "-t",
+            _exact_target(target),
+            "-c",
+            str(start_dir),
+        ]
         for key, value in env.items():
             argv.extend(["-e", f"{key}={value}"])
         argv.append(command)
@@ -161,13 +182,20 @@ class TmuxAdapter:
             target: The pane to query, e.g. `"<session>:worker"`.
 
         Returns:
-            The pane's `PaneInfo`. A non-zero exit means the target does
-            not exist, which is reported as `PaneInfo(dead=True,
-            pid=None)` rather than raised as an error.
+            The pane's `PaneInfo`. Any non-zero exit is reported as
+            `PaneInfo(dead=True, pid=None)` rather than raised, so a
+            missing target reads as a dead pane — and so does a tmux
+            server that is not running.
         """
-        tmux = str(self._tmux_bin)
         result = self._runner(
-            [tmux, "display-message", "-p", "-t", target, "#{pane_dead} #{pane_pid}"]
+            [
+                self._tmux,
+                "display-message",
+                "-p",
+                "-t",
+                _exact_target(target),
+                "#{pane_dead} #{pane_pid}",
+            ]
         )
         if result.returncode != 0:
             return PaneInfo(dead=True, pid=None)
@@ -179,6 +207,11 @@ class TmuxAdapter:
         Args:
             pid: The process ID to signal.
             signum: The signal number to send.
+
+        Raises:
+            ProcessLookupError: If the process is already gone, which is
+                ordinary when a worker exits between a poll and a signal.
+            PermissionError: If the process belongs to another user.
         """
         os.kill(pid, signum)
 
