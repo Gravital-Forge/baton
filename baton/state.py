@@ -209,9 +209,11 @@ class StateStore:
             uninitialized state when state_path does not exist.
 
         Raises:
-            ValueError: If state.json is not valid JSON, or holds a value
-                no lifecycle type accepts.
+            ValueError: If state.json is not valid JSON, holds a value no
+                lifecycle type accepts, or holds a lifecycle report that
+                breaks a payload rule.
             KeyError: If state.json is missing a key the shape requires.
+            TypeError: If a timestamp in state.json is not a string.
         """
         if not self.state_path.exists():
             return ProjectState.fresh()

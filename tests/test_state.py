@@ -17,6 +17,16 @@ from baton.models import (
 )
 from baton.state import StateStore
 
+GOOD_STATE_JSON = {
+    "phase": "running",
+    "project_path": None,
+    "session_name": None,
+    "pane_target": None,
+    "worker": None,
+    "last_report": None,
+    "updated_at": "2026-09-02T16:00:00+00:00",
+}
+
 
 @pytest.fixture
 def store(tmp_path: Path) -> StateStore:
@@ -135,6 +145,64 @@ def test_round_trip_with_optionals_none(store: StateStore, tmp_path: Path) -> No
     assert loaded.worker.pane_pid is None
     assert loaded.last_report is not None
     assert loaded.last_report.next_prompt is None
+
+
+def _write_state_file(store: StateStore, text: str) -> None:
+    """Write raw text straight into the store's state.json.
+
+    Args:
+        store: The store whose state file to write.
+        text: The exact file contents, valid JSON or not.
+    """
+    store.state_dir.mkdir(parents=True, exist_ok=True)
+    store.state_path.write_text(text, encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("description", "text"),
+    [
+        ("an empty file", ""),
+        ("text that is not JSON", "not json at all"),
+        ("an unknown phase", json.dumps({**GOOD_STATE_JSON, "phase": "nonsense"})),
+    ],
+)
+def test_load_rejects_a_malformed_state_file(
+    store: StateStore, description: str, text: str
+) -> None:
+    """load() lets a malformed state file raise rather than repairing it.
+
+    Args:
+        store: The store under test.
+        description: What makes this file malformed, for the test id.
+        text: The malformed file contents.
+    """
+    _write_state_file(store, text)
+
+    with pytest.raises(ValueError):
+        store.load()
+
+
+def test_load_rejects_a_state_file_missing_a_key(store: StateStore) -> None:
+    """load() raises KeyError when state.json lacks a required key."""
+    without_phase = {k: v for k, v in GOOD_STATE_JSON.items() if k != "phase"}
+    _write_state_file(store, json.dumps(without_phase))
+
+    with pytest.raises(KeyError):
+        store.load()
+
+
+def test_load_revalidates_a_persisted_report(store: StateStore) -> None:
+    """A persisted report that breaks a payload rule is rejected on load."""
+    illegal = {
+        **GOOD_STATE_JSON,
+        "last_report": {"state": "completed", "message": None, "next_prompt": None},
+    }
+    _write_state_file(store, json.dumps(illegal))
+
+    with pytest.raises(ValueError) as excinfo:
+        store.load()
+
+    assert "requires a message" in str(excinfo.value)
 
 
 def test_round_trip_with_no_worker_and_no_report(store: StateStore) -> None:
