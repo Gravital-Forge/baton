@@ -18,6 +18,10 @@ from baton.state import StateStore
 def anyio_backend() -> str:
     """Restrict anyio's pytest plugin to the asyncio backend.
 
+    The plugin that reads this fixture arrives with `anyio`, which the
+    `mcp` runtime dependency brings in; it is not a declared dev
+    dependency, and the plan forbids adding one.
+
     Returns:
         The string "asyncio". The engine uses `asyncio.Lock` and
         `asyncio.create_task`, so trio must not be exercised.

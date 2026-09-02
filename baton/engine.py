@@ -67,7 +67,10 @@ class Supervisor:
     async def initialize(
         self, project_path: Path, initial_prompt: str, session_name: str | None = None
     ) -> ProjectState:
-        """Start a new project by launching its first worker. See spec §4.
+        """Start a new project by launching its first worker.
+
+        See spec §13.2 for the session layout and the default session
+        name, and §5 for the protocol skill every worker is given.
 
         Args:
             project_path: The project directory to supervise.
@@ -245,7 +248,7 @@ class Supervisor:
         if self._finish_task is not None:
             await self._finish_task
 
-    def _commit(self, new_state: ProjectState) -> None:
+    def _commit(self, new_state: ProjectState, reason: str | None = None) -> None:
         """Make a new state current, save it, and log any phase change.
 
         The single place a new ProjectState is assigned, saved to the
@@ -254,16 +257,22 @@ class Supervisor:
 
         Args:
             new_state: The state to make current.
+            reason: Why the phase moved, for a transition the normal loop
+                did not choose. Carried in the phase event's payload,
+                where it is the only record of what went wrong.
         """
         old_phase = self._state.phase
         self._state = new_state
         self._store.save(new_state)
-        if new_state.phase != old_phase:
-            self._store.append_event(
-                EventKind.phase,
-                None,
-                {"from": old_phase.value, "to": new_state.phase.value},
-            )
+        if new_state.phase == old_phase:
+            return
+        payload: dict[str, object] = {
+            "from": old_phase.value,
+            "to": new_state.phase.value,
+        }
+        if reason is not None:
+            payload["reason"] = reason
+        self._store.append_event(EventKind.phase, None, payload)
 
     def _launch_worker(
         self, project_path: Path, pane_target: str, prompt: str
@@ -322,26 +331,41 @@ class Supervisor:
                 finish was scheduled rather than re-read from the state.
         """
         await asyncio.sleep(self._config.grace_period)
-        await self._terminate(worker)
+        try:
+            await self._terminate(worker)
+            async with self._lock:
+                self._route(report)
+        except Exception as exc:
+            # Whatever went wrong, the project must not be left in
+            # terminating: that phase refuses every later report and every
+            # new initialization, so the daemon would be stuck until
+            # someone deleted state.json. The raise keeps the failure
+            # retrievable through wait_for_finish.
+            async with self._lock:
+                self._commit(
+                    self._state.updated(phase=ProjectPhase.failed, worker=None),
+                    reason=f"the handoff after a {report.state.value!r} "
+                    f"report failed: {exc}",
+                )
+            raise
 
-        async with self._lock:
-            if report.state == LifecycleState.success:
-                record = self._launch_worker(
-                    self._state.project_path,
-                    self._state.pane_target,
-                    report.next_prompt,
-                )
-                self._commit(
-                    self._state.updated(phase=ProjectPhase.running, worker=record)
-                )
-            elif report.state == LifecycleState.completed:
-                self._commit(
-                    self._state.updated(phase=ProjectPhase.completed, worker=None)
-                )
-            elif report.state == LifecycleState.failed:
-                self._commit(
-                    self._state.updated(phase=ProjectPhase.failed, worker=None)
-                )
+    def _route(self, report: LifecycleReport) -> None:
+        """Move the project on from a terminated worker's report. See spec §17.
+
+        Args:
+            report: The terminal lifecycle report to act on.
+        """
+        if report.state == LifecycleState.success:
+            record = self._launch_worker(
+                self._state.project_path,
+                self._state.pane_target,
+                report.next_prompt,
+            )
+            self._commit(self._state.updated(phase=ProjectPhase.running, worker=record))
+        elif report.state == LifecycleState.completed:
+            self._commit(self._state.updated(phase=ProjectPhase.completed, worker=None))
+        elif report.state == LifecycleState.failed:
+            self._commit(self._state.updated(phase=ProjectPhase.failed, worker=None))
 
     async def _terminate(self, worker: WorkerRecord) -> None:
         """Terminate a worker's pane process and log the outcome. See spec §13.8.
@@ -349,22 +373,35 @@ class Supervisor:
         Args:
             worker: The worker record whose pane process is terminated.
         """
-        pid = worker.pane_pid
-        if pid is None:
-            pane_info = self._tmux.pane_info(target=self._state.pane_target)
-            pid = None if pane_info.dead else pane_info.pid
+        pid = self._worker_pid(worker)
 
         signals: list[str] = []
-        if pid is not None:
+        if pid is not None and self._signal_worker(pid, signal.SIGTERM):
             signals.append(signal.SIGTERM.name)
-            delivered = self._signal_worker(pid, signal.SIGTERM)
-            if delivered and not await self._pane_died():
+            if not await self._pane_died() and self._signal_worker(pid, signal.SIGKILL):
                 signals.append(signal.SIGKILL.name)
-                self._signal_worker(pid, signal.SIGKILL)
 
         self._store.append_event(
             EventKind.terminate, worker.worker_id, {"pid": pid, "signals": signals}
         )
+
+    def _worker_pid(self, worker: WorkerRecord) -> int | None:
+        """Find the process to terminate, asking the pane rather than the record.
+
+        Args:
+            worker: The worker whose launch-time pid is the fallback.
+
+        Returns:
+            The pid to signal, or None when there is nothing to signal.
+            A dead pane has no process left, and its recorded pid may by
+            now belong to something else. A live pane's own pid outranks
+            the recorded one, which a respawn would have made stale; the
+            record stands in only where tmux reports no pid at all.
+        """
+        pane_info = self._tmux.pane_info(target=self._state.pane_target)
+        if pane_info.dead:
+            return None
+        return pane_info.pid if pane_info.pid is not None else worker.pane_pid
 
     def _signal_worker(self, pid: int, signum: signal.Signals) -> bool:
         """Signal a worker's process, tolerating one that has already exited.
