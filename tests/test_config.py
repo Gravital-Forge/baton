@@ -120,6 +120,42 @@ def test_relative_binary_path_becomes_absolute(
     assert config.claude_bin.is_absolute()
 
 
+def test_explicit_binary_path_that_does_not_exist_raises_value_error(
+    tmp_path: Path,
+) -> None:
+    """An explicit BATON_CLAUDE_BIN that does not exist raises ValueError naming it."""
+    environ = {"BATON_CLAUDE_BIN": str(tmp_path / "missing-claude")}
+
+    with pytest.raises(ValueError, match="claude"):
+        BatonConfig.from_env(environ)
+
+
+def test_explicit_binary_path_that_exists_is_accepted(off_path_dir: Path) -> None:
+    """An explicit binary path that exists is accepted for both binaries."""
+    environ = {
+        "BATON_CLAUDE_BIN": str(off_path_dir / "claude"),
+        "BATON_TMUX_BIN": str(off_path_dir / "tmux"),
+    }
+
+    config = BatonConfig.from_env(environ)
+
+    assert config.claude_bin == off_path_dir / "claude"
+    assert config.tmux_bin == off_path_dir / "tmux"
+
+
+def test_relative_state_dir_becomes_absolute(
+    bin_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A relative BATON_STATE_DIR becomes absolute, under the working directory."""
+    monkeypatch.chdir(tmp_path)
+    environ = {"PATH": str(bin_dir), "BATON_STATE_DIR": "custom-state"}
+
+    config = BatonConfig.from_env(environ)
+
+    assert config.state_dir == tmp_path / "custom-state"
+    assert config.state_dir.is_absolute()
+
+
 def test_a_binary_symlink_is_not_followed(tmp_path: Path) -> None:
     """A launcher symlink is kept rather than replaced by its target.
 

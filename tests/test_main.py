@@ -28,6 +28,9 @@ class _FakeServer:
 def _set_baton_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Point every `BATON_*` environment variable at test-safe values.
 
+    Writes an executable stub for each of the two binaries, because
+    `BatonConfig.from_env` refuses an override that names no executable.
+
     Args:
         monkeypatch: The fixture used to set each variable.
         tmp_path: The directory used for the state dir and the two binaries.
@@ -35,8 +38,13 @@ def _set_baton_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("BATON_HOST", "127.0.0.1")
     monkeypatch.setenv("BATON_PORT", "9999")
     monkeypatch.setenv("BATON_STATE_DIR", str(tmp_path))
-    monkeypatch.setenv("BATON_CLAUDE_BIN", str(tmp_path / "claude"))
-    monkeypatch.setenv("BATON_TMUX_BIN", str(tmp_path / "tmux"))
+    claude_bin = tmp_path / "claude"
+    tmux_bin = tmp_path / "tmux"
+    for stub in (claude_bin, tmux_bin):
+        stub.write_text("#!/bin/sh\n")
+        stub.chmod(0o755)
+    monkeypatch.setenv("BATON_CLAUDE_BIN", str(claude_bin))
+    monkeypatch.setenv("BATON_TMUX_BIN", str(tmux_bin))
 
 
 def test_main_runs_the_server_over_sse_with_the_configured_host_and_port(

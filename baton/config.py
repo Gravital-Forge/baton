@@ -53,11 +53,14 @@ def _resolve_binary(environ: Mapping[str, str], key: str, name: str) -> Path:
         unfollowed.
 
     Raises:
-        ValueError: If neither the environment variable nor a PATH search
-            locates the executable.
+        ValueError: If the environment variable is set to a value that does
+            not resolve to an executable, or if it is absent and a PATH
+            search does not locate the executable.
     """
-    found = environ.get(key)
-    if not found:
+    value = environ.get(key)
+    if value:
+        found = shutil.which(value)
+    else:
         found = shutil.which(name, path=environ.get("PATH", ""))
     if not found:
         raise ValueError(
@@ -131,7 +134,7 @@ class BatonConfig:
         return cls(
             host=environ.get("BATON_HOST", DEFAULT_HOST),
             port=_read_int(environ, "BATON_PORT", DEFAULT_PORT),
-            state_dir=Path(state_dir).expanduser(),
+            state_dir=Path(state_dir).expanduser().absolute(),
             claude_bin=_resolve_binary(environ, "BATON_CLAUDE_BIN", "claude"),
             tmux_bin=_resolve_binary(environ, "BATON_TMUX_BIN", "tmux"),
             grace_period=_read_int(environ, "BATON_GRACE_PERIOD", DEFAULT_GRACE_PERIOD),
