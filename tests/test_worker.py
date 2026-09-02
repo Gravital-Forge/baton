@@ -134,6 +134,7 @@ def _expected_launch_script(
         f"  --session-id {shlex.quote(worker_id)} \\\n"
         f"  --mcp-config {shlex.quote(str(mcp_config_path))} \\\n"
         f"  --append-system-prompt {shlex.quote(WORKER_PREAMBLE)} \\\n"
+        "  -- \\\n"
         f'  "$(cat {shlex.quote(str(prompt_path))})"\n'
     )
 

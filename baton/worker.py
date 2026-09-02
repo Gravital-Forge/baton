@@ -18,6 +18,7 @@ _LAUNCH_SCRIPT_TEMPLATE = (
     "  --session-id {worker_id} \\\n"
     "  --mcp-config {mcp_config} \\\n"
     "  --append-system-prompt {preamble} \\\n"
+    "  -- \\\n"
     '  "$(cat {prompt_path})"\n'
 )
 
