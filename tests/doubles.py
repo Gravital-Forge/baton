@@ -29,6 +29,7 @@ class FakeTmux:
         sessions: Sequence[str] = (),
         pane_infos: Sequence[PaneInfo] = (),
         create_error: Exception | None = None,
+        pane_info_error: Exception | None = None,
         kill_errors: Sequence[Exception | None] = (),
         send_error: Exception | None = None,
     ) -> None:
@@ -41,6 +42,8 @@ class FakeTmux:
                 scripted, `pane_info` returns a dead pane with no pid.
             create_error: The exception `create_session` raises, when set,
                 instead of recording the call.
+            pane_info_error: The exception `pane_info` raises, when set,
+                instead of recording the call and returning a reading.
             kill_errors: What `signal_pane` raises on each call, in call
                 order, where `None` is a signal that lands. The last entry
                 repeats once they run out.
@@ -50,6 +53,7 @@ class FakeTmux:
         self.sessions: set[str] = set(sessions)
         self._pane_infos = list(pane_infos)
         self._create_error = create_error
+        self._pane_info_error = pane_info_error
         self._kill_errors = list(kill_errors)
         self._send_error = send_error
         self.has_session_calls: list[str] = []
@@ -130,7 +134,12 @@ class FakeTmux:
             The next scripted `PaneInfo`, repeating the last one once the
             script is exhausted, or a dead pane with no pid when none was
             scripted.
+
+        Raises:
+            Exception: `pane_info_error`, when one was scripted.
         """
+        if self._pane_info_error is not None:
+            raise self._pane_info_error
         self.pane_info_calls.append(target)
         if not self._pane_infos:
             return PaneInfo(dead=True, pid=None)

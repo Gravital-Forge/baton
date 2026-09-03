@@ -798,6 +798,12 @@ async def test_failed_report_produces_the_recovery_event_sequence_in_order(
         EventKind.launch,
         EventKind.phase,
     ]
+    phase_events = [event for event in events if event.kind == EventKind.phase]
+    assert [(event.payload["from"], event.payload["to"]) for event in phase_events] == [
+        (ProjectPhase.uninitialized.value, ProjectPhase.running.value),
+        (ProjectPhase.running.value, ProjectPhase.terminating.value),
+        (ProjectPhase.terminating.value, ProjectPhase.recovering.value),
+    ]
     assert events[-1].payload["reason"] == "the worker reported failed: it broke"
 
 
@@ -1376,14 +1382,22 @@ async def test_check_worker_recovery_that_fails_to_launch_ends_in_failed(
     tmux: FakeTmux,
     make_launcher: Callable[..., FakeLauncher],
     project_dir: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """A recovery launch that raises ends the project in failed, not raising."""
     launcher = make_launcher(launch_errors=[None, TmuxError("session gone")])
     supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
     await supervisor.initialize(project_dir, "start here")
 
-    await supervisor.check_worker()
+    with caplog.at_level(logging.ERROR, logger="baton.engine"):
+        await supervisor.check_worker()
 
+    records = [record for record in caplog.records if record.name == "baton.engine"]
+    assert len(records) == 1
+    assert records[0].getMessage() == (
+        "recovery after the worker's pane died without a terminal report failed"
+    )
+    assert records[0].exc_info is not None
     assert supervisor.snapshot().phase == ProjectPhase.failed
     assert supervisor.snapshot().worker is None
     phase_event = supervisor.recent_events(count=20)[-1]
@@ -1435,6 +1449,39 @@ async def test_start_runs_the_watchdog_that_polls_the_pane(
 
     assert len(tmux.pane_info_calls) >= 1
     assert tmux.pane_info_calls[0] == result.pane_target
+    assert supervisor.snapshot().phase == ProjectPhase.running
+
+
+@pytest.mark.anyio
+async def test_the_watchdog_survives_a_tick_that_raises(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A tick that raises is logged and the watchdog goes on to the next one.
+
+    check_worker swallows a failed recovery, but the pane read before it
+    does not: a tmux binary that has gone missing raises OSError there. If
+    that escaped, the loop would end for the daemon's whole life and
+    shutdown would re-raise instead of draining.
+    """
+    tmux = make_tmux(pane_info_error=OSError("tmux is gone"))
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+    await supervisor.initialize(project_dir, "start here")
+
+    with caplog.at_level(logging.ERROR, logger="baton.engine"):
+        await supervisor.start()
+        for _ in range(6):
+            await asyncio.sleep(0)
+        await supervisor.shutdown()
+
+    records = [record for record in caplog.records if record.name == "baton.engine"]
+    assert len(records) >= 2
+    assert records[0].getMessage() == "the watchdog tick failed"
+    assert records[0].exc_info is not None
     assert supervisor.snapshot().phase == ProjectPhase.running
 
 

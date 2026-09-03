@@ -337,7 +337,7 @@ class Supervisor:
             reason = "the worker's pane died without a terminal report"
             try:
                 self._recover(reason)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001 - the loop must survive this
                 _log.exception("recovery after %s failed", reason)
                 self._commit(
                     self._state.updated(phase=ProjectPhase.failed, worker=None),
@@ -351,11 +351,22 @@ class Supervisor:
     async def _watch(self) -> None:
         """Poll the current worker's pane on a fixed interval, forever.
 
-        This is the watchdog loop; it runs until shutdown cancels it.
+        This is the watchdog loop; it runs until shutdown cancels it. A
+        tick that raises is logged and the loop goes on to the next one.
+        check_worker swallows a failed recovery, but the pane read and the
+        vanish event before it can still fail, and an exception let out
+        here would end the watchdog for the daemon's whole life — leaving
+        every later vanish undetected, with nothing but an unretrieved-task
+        warning to show for it. It would also break shutdown, which awaits
+        this task expecting to suppress a CancelledError and would instead
+        re-raise, never reaching wait_for_finish.
         """
         while True:
             await asyncio.sleep(self._config.poll_interval)
-            await self.check_worker()
+            try:
+                await self.check_worker()
+            except Exception:  # noqa: BLE001 - a failed tick must not end the loop
+                _log.exception("the watchdog tick failed")
 
     async def shutdown(self) -> None:
         """Stop the watchdog and drain any finish still pending.
