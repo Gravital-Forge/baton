@@ -2,11 +2,12 @@
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
+from starlette.routing import Mount
 
 from baton.config import BatonConfig
 from baton.engine import Supervisor, SupervisorError
 from baton.models import ProjectPhase
-from baton.server import build_server, build_supervisor
+from baton.server import build_app, build_server, build_supervisor
 from baton.tools import BatonTools
 from tests.doubles import StubSupervisor
 
@@ -111,3 +112,52 @@ async def test_a_supervisor_error_reaches_the_caller_as_a_tool_error(
 
     assert not isinstance(excinfo.value, UnexpectedToolError)
     assert str(excinfo.value).endswith(message)
+
+
+@pytest.mark.anyio
+async def test_build_app_lifespan_starts_and_shuts_down_the_supervisor(
+    config: BatonConfig, make_stub_supervisor: type[StubSupervisor]
+) -> None:
+    """Driving the app's lifespan runs the supervisor's hooks around it.
+
+    The drive is done by hand, with a scripted `receive` and a recording
+    `send`, rather than through Starlette's `TestClient`: the by-hand drive
+    runs the lifespan on the test's own loop, with no portal thread and no
+    HTTP client, and asserts the protocol messages directly.
+    """
+    stub = make_stub_supervisor()
+    server = build_server(stub)
+    app = build_app(stub, server, config)
+
+    scope = {"type": "lifespan", "asgi": {"version": "3.0", "spec_version": "2.0"}}
+    incoming = iter([{"type": "lifespan.startup"}, {"type": "lifespan.shutdown"}])
+    sent: list[dict[str, object]] = []
+
+    async def receive() -> dict[str, object]:
+        """Hand back the next scripted lifespan message."""
+        return next(incoming)
+
+    async def send(message: dict[str, object]) -> None:
+        """Record a lifespan protocol message sent by the app."""
+        sent.append(message)
+
+    await app(scope, receive, send)
+
+    assert [message["type"] for message in sent] == [
+        "lifespan.startup.complete",
+        "lifespan.shutdown.complete",
+    ]
+    assert stub.hook_calls == ["start", "shutdown"]
+
+
+def test_build_app_mounts_the_sse_server_at_the_root(
+    config: BatonConfig, make_stub_supervisor: type[StubSupervisor]
+) -> None:
+    """The app's one route mounts the MCP server, with /sse reachable at it."""
+    stub = make_stub_supervisor()
+    server = build_server(stub)
+    app = build_app(stub, server, config)
+
+    [mount] = app.routes
+    assert isinstance(mount, Mount)
+    assert any(route.path == "/sse" for route in mount.app.routes)

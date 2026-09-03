@@ -5,6 +5,7 @@ for the rules this module encodes.
 """
 
 import asyncio
+import contextlib
 import logging
 import signal
 import time
@@ -20,11 +21,24 @@ from baton.models import (
     ProjectState,
     WorkerRecord,
 )
+from baton.prompts import diagnosis_prompt
 from baton.state import StateStore
 from baton.tmux import TmuxAdapter
 from baton.worker import WorkerLauncher, write_mcp_config
 
 _log = logging.getLogger(__name__)
+
+
+def _pane_target(session: str) -> str:
+    """Compute the tmux pane a project's worker is launched into.
+
+    Args:
+        session: The tmux session name.
+
+    Returns:
+        The pane target within the session's sole worker window.
+    """
+    return f"{session}:worker.0"
 
 
 class SupervisorError(Exception):
@@ -66,6 +80,7 @@ class Supervisor:
         self._state = store.load()
         self._lock = asyncio.Lock()
         self._finish_task: asyncio.Task[None] | None = None
+        self._watchdog_task: asyncio.Task[None] | None = None
 
     async def initialize(
         self,
@@ -92,11 +107,11 @@ class Supervisor:
             The committed ProjectState, in phase running.
 
         Raises:
-            SupervisorError: If a project is already running, blocked, or
-                terminating; if project_path is not an existing directory;
-                if initial_prompt, a given session_name, or a given model
-                is blank; or if model is None and no default is
-                configured.
+            SupervisorError: If a project is already running, blocked,
+                terminating, recovering, or reconciling; if project_path
+                is not an existing directory; if initial_prompt, a given
+                session_name, or a given model is blank; or if model is
+                None and no default is configured.
             TmuxError: If checking whether the session exists, creating
                 it, or launching the worker fails.
         """
@@ -105,6 +120,8 @@ class Supervisor:
                 ProjectPhase.running,
                 ProjectPhase.blocked,
                 ProjectPhase.terminating,
+                ProjectPhase.recovering,
+                ProjectPhase.reconciling,
             ):
                 raise SupervisorError(
                     f"cannot initialize while the project at "
@@ -136,16 +153,13 @@ class Supervisor:
             session = (
                 session_name if session_name is not None else f"baton-{resolved.name}"
             )
-            pane_target = f"{session}:worker.0"
+            pane_target = _pane_target(session)
 
             write_mcp_config(self._config)
             self._launcher.install_skill(project_path=resolved)
 
-            if not self._tmux.has_session(session=session):
-                self._tmux.create_session(session=session, start_dir=resolved)
-
             record = self._launch_worker(
-                resolved, pane_target, initial_prompt, chosen_model
+                resolved, session, initial_prompt, chosen_model
             )
             self._commit(
                 ProjectState.fresh().updated(
@@ -213,9 +227,8 @@ class Supervisor:
             self._require_current_worker(worker_id)
             if self._state.phase == ProjectPhase.terminating:
                 raise SupervisorError(
-                    f"worker {worker_id!r} already reported "
-                    f"{self._state.last_report.state.value!r}; the first "
-                    "terminal report is final"
+                    f"worker {worker_id!r} is terminating and baton accepts "
+                    "no further report from it"
                 )
 
             self._store.append_event(
@@ -294,6 +307,68 @@ class Supervisor:
         if self._finish_task is not None:
             await self._finish_task
 
+    async def check_worker(self) -> None:
+        """Run one watchdog tick: recover the current worker if its pane vanished.
+
+        A vanish is a dead pane found with no terminal report on file: the
+        worker's process ended without ever calling report_lifecycle. This
+        method is the watchdog loop's only production caller, so a
+        recovery launch that fails here is logged and moves the project
+        to failed rather than raised — the loop must keep running for the
+        next tick. Contrast _finish, whose failure is re-raised, because
+        wait_for_finish exists to surface it to whoever awaits it.
+        """
+        async with self._lock:
+            if (
+                self._state.worker is None
+                or self._state.phase == ProjectPhase.terminating
+            ):
+                return
+            if not self._tmux.pane_info(target=self._state.pane_target).dead:
+                return
+            self._store.append_event(
+                EventKind.vanish,
+                self._state.worker.worker_id,
+                {
+                    "pane_target": self._state.pane_target,
+                    "phase": self._state.phase.value,
+                },
+            )
+            reason = "the worker's pane died without a terminal report"
+            try:
+                self._recover(reason)
+            except Exception as exc:  # noqa: BLE001
+                _log.exception("recovery after %s failed", reason)
+                self._commit(
+                    self._state.updated(phase=ProjectPhase.failed, worker=None),
+                    reason=f"recovery after {reason} failed: {exc}",
+                )
+
+    async def start(self) -> None:
+        """Start the background watchdog that recovers a vanished worker."""
+        self._watchdog_task = asyncio.create_task(self._watch())
+
+    async def _watch(self) -> None:
+        """Poll the current worker's pane on a fixed interval, forever.
+
+        This is the watchdog loop; it runs until shutdown cancels it.
+        """
+        while True:
+            await asyncio.sleep(self._config.poll_interval)
+            await self.check_worker()
+
+    async def shutdown(self) -> None:
+        """Stop the watchdog and drain any finish still pending.
+
+        Safe to call whether or not start was ever called, and whether or
+        not a finish is pending.
+        """
+        if self._watchdog_task is not None:
+            self._watchdog_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._watchdog_task
+        await self.wait_for_finish()
+
     def _commit(self, new_state: ProjectState, reason: str | None = None) -> None:
         """Make a new state current, save it, and log any phase change.
 
@@ -321,19 +396,28 @@ class Supervisor:
         self._store.append_event(EventKind.phase, None, payload)
 
     def _launch_worker(
-        self, project_path: Path, pane_target: str, prompt: str, model: str
+        self, project_path: Path, session: str, prompt: str, model: str
     ) -> WorkerRecord:
         """Launch a worker into the project's pane and log the launch.
 
+        Creates the tmux session first when it does not already exist.
+
         Args:
             project_path: The directory the worker's pane starts in.
-            pane_target: The tmux pane the worker is launched into.
+            session: The tmux session the worker is launched into.
             prompt: The task prompt the worker is launched with.
             model: The model the worker is launched with.
 
         Returns:
             The record of the launched worker.
+
+        Raises:
+            TmuxError: If creating the session or launching the worker
+                fails.
         """
+        if not self._tmux.has_session(session=session):
+            self._tmux.create_session(session=session, start_dir=project_path)
+        pane_target = _pane_target(session)
         record = self._launcher.launch(
             project_path=project_path,
             pane_target=pane_target,
@@ -411,15 +495,65 @@ class Supervisor:
         if report.state == LifecycleState.success:
             record = self._launch_worker(
                 self._state.project_path,
-                self._state.pane_target,
+                self._state.session_name,
                 report.next_prompt,
                 self._state.model,
             )
-            self._commit(self._state.updated(phase=ProjectPhase.running, worker=record))
+            self._commit(
+                self._state.updated(
+                    phase=ProjectPhase.running, worker=record, recovery_attempts=0
+                )
+            )
         elif report.state == LifecycleState.completed:
             self._commit(self._state.updated(phase=ProjectPhase.completed, worker=None))
         elif report.state == LifecycleState.failed:
-            self._commit(self._state.updated(phase=ProjectPhase.failed, worker=None))
+            self._recover(f"the worker reported failed: {report.message}")
+
+    def _recover(self, reason: str) -> None:
+        """Launch a diagnosis worker, or stop at the recovery cap.
+
+        Called with the lock held and a current worker in the state. See
+        "The normal loop" in docs/architecture.md for the recovery cycle.
+
+        Args:
+            reason: Why recovery was triggered. Recorded as the phase
+                event's reason, and, when a diagnosis worker is launched,
+                included in its prompt.
+
+        Raises:
+            TmuxError: If launching the diagnosis worker fails.
+        """
+        previous = self._state.worker
+        attempts = self._state.recovery_attempts
+        if attempts >= self._config.recovery_cap:
+            self._commit(
+                self._state.updated(phase=ProjectPhase.failed, worker=None),
+                reason=f"recovery cap of {self._config.recovery_cap} reached: {reason}",
+            )
+            return
+        prompt = diagnosis_prompt(
+            project_path=self._state.project_path,
+            previous_worker_id=previous.worker_id,
+            previous_prompt_path=previous.prompt_path,
+            reason=reason,
+            events_path=self._store.events_path,
+            attempt=attempts + 1,
+            cap=self._config.recovery_cap,
+        )
+        record = self._launch_worker(
+            self._state.project_path,
+            self._state.session_name,
+            prompt,
+            self._state.model,
+        )
+        self._commit(
+            self._state.updated(
+                phase=ProjectPhase.recovering,
+                worker=record,
+                recovery_attempts=attempts + 1,
+            ),
+            reason=reason,
+        )
 
     async def _terminate(self, worker: WorkerRecord) -> None:
         """Terminate a worker's pane process and log the outcome.

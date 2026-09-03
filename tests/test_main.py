@@ -9,22 +9,6 @@ import baton.__main__ as main_module
 from baton.config import BatonConfig
 
 
-class _FakeServer:
-    """A stand-in for the `MCPServer` `main()` builds, recording its `run` call."""
-
-    def __init__(self) -> None:
-        """Start with no recorded call."""
-        self.run_calls: list[dict[str, object]] = []
-
-    def run(self, **kwargs: object) -> None:
-        """Record the keyword arguments `run` was called with.
-
-        Args:
-            kwargs: The keyword arguments passed to `run`.
-        """
-        self.run_calls.append(kwargs)
-
-
 def _set_baton_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Point every `BATON_*` environment variable at test-safe values.
 
@@ -47,20 +31,33 @@ def _set_baton_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("BATON_TMUX_BIN", str(tmux_bin))
 
 
-def test_main_runs_the_server_over_sse_with_the_configured_host_and_port(
+def test_main_runs_the_app_under_uvicorn_with_the_configured_host_and_port(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """main() runs the server over sse, on the host and port from the environment."""
+    """main() runs the built app under uvicorn, on the environment's host and port."""
     _set_baton_env(monkeypatch, tmp_path)
-    fake_server = _FakeServer()
+    sentinel_app = object()
+    run_calls: list[dict[str, object]] = []
+
+    def fake_run(app: object, **kwargs: object) -> None:
+        """Record the app passed positionally and the keyword arguments.
+
+        Args:
+            app: The ASGI app passed to `uvicorn.run`.
+            kwargs: The keyword arguments passed to `uvicorn.run`.
+        """
+        run_calls.append({"app": app, **kwargs})
+
     monkeypatch.setattr(main_module, "build_supervisor", lambda config: object())
-    monkeypatch.setattr(main_module, "build_server", lambda supervisor: fake_server)
+    monkeypatch.setattr(main_module, "build_server", lambda supervisor: object())
+    monkeypatch.setattr(
+        main_module, "build_app", lambda supervisor, server, config: sentinel_app
+    )
+    monkeypatch.setattr(main_module.uvicorn, "run", fake_run)
 
     main_module.main()
 
-    assert fake_server.run_calls == [
-        {"transport": "sse", "host": "127.0.0.1", "port": 9999}
-    ]
+    assert run_calls == [{"app": sentinel_app, "host": "127.0.0.1", "port": 9999}]
 
 
 def test_main_writes_the_mcp_client_config_into_the_state_dir(
@@ -69,7 +66,11 @@ def test_main_writes_the_mcp_client_config_into_the_state_dir(
     """main() writes mcp.json before running, so a session can be pointed at it."""
     _set_baton_env(monkeypatch, tmp_path)
     monkeypatch.setattr(main_module, "build_supervisor", lambda config: object())
-    monkeypatch.setattr(main_module, "build_server", lambda supervisor: _FakeServer())
+    monkeypatch.setattr(main_module, "build_server", lambda supervisor: object())
+    monkeypatch.setattr(
+        main_module, "build_app", lambda supervisor, server, config: object()
+    )
+    monkeypatch.setattr(main_module.uvicorn, "run", lambda app, **kwargs: None)
 
     main_module.main()
 
@@ -84,8 +85,8 @@ def test_main_wires_the_built_config_and_supervisor_through(
 ) -> None:
     """main() passes its config on, then hands the supervisor to build_server."""
     _set_baton_env(monkeypatch, tmp_path)
-    fake_server = _FakeServer()
     sentinel_supervisor = object()
+    sentinel_server = object()
     captured_configs: list[BatonConfig] = []
     captured_supervisors: list[object] = []
 
@@ -101,22 +102,75 @@ def test_main_wires_the_built_config_and_supervisor_through(
         captured_configs.append(config)
         return sentinel_supervisor
 
-    def fake_build_server(supervisor: object) -> _FakeServer:
-        """Record the supervisor passed in and return the fake server.
+    def fake_build_server(supervisor: object) -> object:
+        """Record the supervisor passed in and return a sentinel server.
 
         Args:
             supervisor: The supervisor main() built.
 
         Returns:
-            The fake server this test asserts on.
+            The sentinel server this test asserts on.
         """
         captured_supervisors.append(supervisor)
-        return fake_server
+        return sentinel_server
 
     monkeypatch.setattr(main_module, "build_supervisor", fake_build_supervisor)
     monkeypatch.setattr(main_module, "build_server", fake_build_server)
+    monkeypatch.setattr(
+        main_module, "build_app", lambda supervisor, server, config: object()
+    )
+    monkeypatch.setattr(main_module.uvicorn, "run", lambda app, **kwargs: None)
 
     main_module.main()
 
     assert captured_configs == [BatonConfig.from_env()]
     assert captured_supervisors == [sentinel_supervisor]
+
+
+def test_main_wires_the_supervisor_server_and_config_into_build_app(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """main() hands build_app the supervisor, the server, and the config it built.
+
+    The fake's parameter names pin the order main() calls build_app with:
+    supervisor, then server, then config.
+    """
+    _set_baton_env(monkeypatch, tmp_path)
+    sentinel_supervisor = object()
+    sentinel_server = object()
+    build_app_calls: list[dict[str, object]] = []
+
+    def fake_build_app(
+        supervisor: object, server: object, config: BatonConfig
+    ) -> object:
+        """Record the arguments build_app was called with.
+
+        Args:
+            supervisor: The supervisor main() built.
+            server: The server main() built.
+            config: The config main() built.
+
+        Returns:
+            A sentinel app this test does not otherwise inspect.
+        """
+        build_app_calls.append(
+            {"supervisor": supervisor, "server": server, "config": config}
+        )
+        return object()
+
+    monkeypatch.setattr(
+        main_module, "build_supervisor", lambda config: sentinel_supervisor
+    )
+    monkeypatch.setattr(main_module, "build_server", lambda supervisor: sentinel_server)
+    monkeypatch.setattr(main_module, "build_app", fake_build_app)
+    monkeypatch.setattr(main_module.uvicorn, "run", lambda app, **kwargs: None)
+
+    main_module.main()
+
+    assert build_app_calls == [
+        {
+            "supervisor": sentinel_supervisor,
+            "server": sentinel_server,
+            "config": BatonConfig.from_env(),
+        }
+    ]

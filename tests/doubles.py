@@ -287,6 +287,7 @@ class StubSupervisor:
         self.record_status_calls: list[dict[str, object]] = []
         self.report_lifecycle_calls: list[dict[str, object]] = []
         self.recent_events_calls: list[int] = []
+        self.hook_calls: list[str] = []
 
     async def initialize(
         self,
@@ -384,3 +385,11 @@ class StubSupervisor:
         """
         self.recent_events_calls.append(count)
         return self._events
+
+    async def start(self) -> None:
+        """Record that the pane watchdog was started."""
+        self.hook_calls.append("start")
+
+    async def shutdown(self) -> None:
+        """Record that the pane watchdog was stopped and work drained."""
+        self.hook_calls.append("shutdown")

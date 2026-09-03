@@ -1,5 +1,6 @@
 """Tests for baton.engine."""
 
+import asyncio
 import logging
 import re
 import signal
@@ -744,27 +745,182 @@ async def test_completed_report_terminates_and_stops_with_no_worker(
 
 
 @pytest.mark.anyio
-async def test_failed_report_terminates_and_stops_with_no_worker(
+async def test_failed_report_launches_a_diagnosis_worker_and_recovers(
     config: BatonConfig,
+    store: StateStore,
     supervisor: Supervisor,
-    tmux: FakeTmux,
     launcher: FakeLauncher,
     project_dir: Path,
 ) -> None:
-    """A failed report terminates the worker and stops in phase failed."""
+    """A failed report launches a diagnosis worker and moves to recovering."""
     result = await supervisor.initialize(project_dir, "start here")
+    previous_worker = result.worker
 
+    await supervisor.report_lifecycle(
+        previous_worker.worker_id, LifecycleState.failed, message="it broke"
+    )
+    await supervisor.wait_for_finish()
+
+    assert len(launcher.launches) == 2
+    diagnosis_prompt = launcher.launches[1]["prompt"]
+    assert "the worker reported failed: it broke" in diagnosis_prompt
+    assert str(previous_worker.prompt_path) in diagnosis_prompt
+    assert str(store.events_path) in diagnosis_prompt
+
+    for state in _persisted_and_live(config, supervisor):
+        assert state.phase == ProjectPhase.recovering
+        assert state.recovery_attempts == 1
+        assert state.worker is not None
+        assert state.worker.worker_id == "worker-2"
+
+
+@pytest.mark.anyio
+async def test_failed_report_produces_the_recovery_event_sequence_in_order(
+    supervisor: Supervisor, project_dir: Path
+) -> None:
+    """A failed report produces the pinned recovery event sequence, in order."""
+    await supervisor.initialize(project_dir, "start here")
+
+    await supervisor.report_lifecycle(
+        supervisor.snapshot().worker.worker_id,
+        LifecycleState.failed,
+        message="it broke",
+    )
+    await supervisor.wait_for_finish()
+
+    events = supervisor.recent_events(count=20)
+    assert [event.kind for event in events] == [
+        EventKind.launch,
+        EventKind.phase,
+        EventKind.lifecycle,
+        EventKind.phase,
+        EventKind.terminate,
+        EventKind.launch,
+        EventKind.phase,
+    ]
+    assert events[-1].payload["reason"] == "the worker reported failed: it broke"
+
+
+@pytest.mark.anyio
+async def test_a_diagnosis_workers_failed_report_launches_the_next_diagnosis_worker(
+    config: BatonConfig,
+    supervisor: Supervisor,
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """A diagnosis worker's failed report launches the next diagnosis worker."""
+    result = await supervisor.initialize(project_dir, "start here")
     await supervisor.report_lifecycle(
         result.worker.worker_id, LifecycleState.failed, message="it broke"
     )
     await supervisor.wait_for_finish()
+    second_worker = supervisor.snapshot().worker
 
+    await supervisor.report_lifecycle(
+        second_worker.worker_id, LifecycleState.failed, message="it broke again"
+    )
+    await supervisor.wait_for_finish()
+
+    assert len(launcher.launches) == 3
+    for state in _persisted_and_live(config, supervisor):
+        assert state.phase == ProjectPhase.recovering
+        assert state.recovery_attempts == 2
+
+
+@pytest.mark.anyio
+async def test_the_recovery_cap_stops_diagnosis_and_moves_to_failed(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """Three consecutive failed reports hit the cap and stop in phase failed."""
+    capped_config = replace(config, recovery_cap=2)
+    supervisor = Supervisor(
+        config=capped_config, store=store, tmux=tmux, launcher=launcher
+    )
+    result = await supervisor.initialize(project_dir, "start here")
+
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.failed, message="first failure"
+    )
+    await supervisor.wait_for_finish()
+    second_worker = supervisor.snapshot().worker
+
+    await supervisor.report_lifecycle(
+        second_worker.worker_id, LifecycleState.failed, message="second failure"
+    )
+    await supervisor.wait_for_finish()
+    third_worker = supervisor.snapshot().worker
+
+    await supervisor.report_lifecycle(
+        third_worker.worker_id, LifecycleState.failed, message="third failure"
+    )
+    await supervisor.wait_for_finish()
+
+    assert len(launcher.launches) == 3
     for state in _persisted_and_live(config, supervisor):
         assert state.phase == ProjectPhase.failed
         assert state.worker is None
-    assert tmux.pane_info_calls == [result.pane_target]
-    assert tmux.signals == []
-    assert len(launcher.launches) == 1
+
+    phase_event = supervisor.recent_events(count=30)[-1]
+    assert phase_event.payload["reason"] == (
+        "recovery cap of 2 reached: the worker reported failed: third failure"
+    )
+
+
+@pytest.mark.anyio
+async def test_a_diagnosis_workers_success_report_resets_recovery_attempts(
+    config: BatonConfig,
+    supervisor: Supervisor,
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """A diagnosis worker's success report resets recovery_attempts to zero."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.failed, message="it broke"
+    )
+    await supervisor.wait_for_finish()
+    diagnosis_worker = supervisor.snapshot().worker
+
+    await supervisor.report_lifecycle(
+        diagnosis_worker.worker_id,
+        LifecycleState.success,
+        message="fixed it",
+        next_prompt="continue the task",
+    )
+    await supervisor.wait_for_finish()
+
+    for state in _persisted_and_live(config, supervisor):
+        assert state.phase == ProjectPhase.running
+        assert state.recovery_attempts == 0
+    assert len(launcher.launches) == 3
+    assert launcher.launches[2]["prompt"] == "continue the task"
+
+
+@pytest.mark.anyio
+async def test_a_running_report_while_recovering_moves_nothing(
+    config: BatonConfig, supervisor: Supervisor, project_dir: Path
+) -> None:
+    """A running report while recovering is recorded without a phase move."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.failed, message="it broke"
+    )
+    await supervisor.wait_for_finish()
+    diagnosis_worker = supervisor.snapshot().worker
+
+    await supervisor.report_lifecycle(
+        diagnosis_worker.worker_id, LifecycleState.running, message="diagnosing"
+    )
+    await supervisor.wait_for_finish()
+
+    for state in _persisted_and_live(config, supervisor):
+        assert state.phase == ProjectPhase.recovering
+        assert state.recovery_attempts == 1
+        assert state.last_report.state == LifecycleState.running
 
 
 @pytest.mark.anyio
@@ -864,8 +1020,8 @@ async def test_second_report_while_terminating_is_refused(
     )
 
     expected = (
-        f"worker {result.worker.worker_id!r} already reported 'completed'; "
-        "the first terminal report is final"
+        f"worker {result.worker.worker_id!r} is terminating and baton "
+        "accepts no further report from it"
     )
     with pytest.raises(SupervisorError, match=re.escape(expected)):
         await supervisor.report_lifecycle(
@@ -1110,3 +1266,244 @@ async def test_wait_for_finish_with_no_pending_finish_returns_immediately(
 ) -> None:
     """wait_for_finish returns without error when no finish is pending."""
     await supervisor.wait_for_finish()
+
+
+@pytest.mark.anyio
+async def test_check_worker_with_a_dead_pane_while_running_recovers(
+    supervisor: Supervisor, launcher: FakeLauncher, project_dir: Path
+) -> None:
+    """A dead pane found while running is logged as a vanish and recovered."""
+    result = await supervisor.initialize(project_dir, "start here")
+    first_worker = result.worker
+
+    await supervisor.check_worker()
+
+    vanish_event = next(
+        event
+        for event in supervisor.recent_events(count=10)
+        if event.kind == EventKind.vanish
+    )
+    assert vanish_event.worker_id == first_worker.worker_id
+    assert vanish_event.payload == {
+        "pane_target": result.pane_target,
+        "phase": "running",
+    }
+    assert len(launcher.launches) == 2
+    assert (
+        "the worker's pane died without a terminal report"
+        in launcher.launches[1]["prompt"]
+    )
+    assert supervisor.snapshot().phase == ProjectPhase.recovering
+    assert supervisor.snapshot().recovery_attempts == 1
+
+
+@pytest.mark.anyio
+async def test_check_worker_with_a_dead_pane_while_blocked_recovers(
+    supervisor: Supervisor, launcher: FakeLauncher, project_dir: Path
+) -> None:
+    """A dead pane found while blocked is logged as a vanish and recovered."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.blocked, message="stuck"
+    )
+
+    await supervisor.check_worker()
+
+    vanish_event = next(
+        event
+        for event in supervisor.recent_events(count=10)
+        if event.kind == EventKind.vanish
+    )
+    assert vanish_event.payload["phase"] == "blocked"
+    assert supervisor.snapshot().phase == ProjectPhase.recovering
+    assert len(launcher.launches) == 2
+
+
+@pytest.mark.anyio
+async def test_check_worker_with_a_live_pane_changes_nothing(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """A live pane during check_worker changes nothing, but is read."""
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=1)])
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+    result = await supervisor.initialize(project_dir, "start here")
+    before = supervisor.snapshot()
+
+    await supervisor.check_worker()
+
+    assert supervisor.snapshot() == before
+    assert len(launcher.launches) == 1
+    assert tmux.pane_info_calls == [result.pane_target]
+
+
+@pytest.mark.anyio
+async def test_check_worker_with_no_worker_reads_no_pane(
+    supervisor: Supervisor, tmux: FakeTmux
+) -> None:
+    """check_worker with no worker running changes nothing and reads no pane."""
+    await supervisor.check_worker()
+
+    assert tmux.pane_info_calls == []
+    assert supervisor.snapshot().phase == ProjectPhase.uninitialized
+
+
+@pytest.mark.anyio
+async def test_check_worker_while_terminating_reads_no_pane(
+    supervisor: Supervisor, tmux: FakeTmux, project_dir: Path
+) -> None:
+    """check_worker while terminating changes nothing and reads no pane."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.completed, message="all done"
+    )
+
+    await supervisor.check_worker()
+
+    assert tmux.pane_info_calls == []
+    assert supervisor.snapshot().phase == ProjectPhase.terminating
+
+    await supervisor.wait_for_finish()
+
+
+@pytest.mark.anyio
+async def test_check_worker_recovery_that_fails_to_launch_ends_in_failed(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    make_launcher: Callable[..., FakeLauncher],
+    project_dir: Path,
+) -> None:
+    """A recovery launch that raises ends the project in failed, not raising."""
+    launcher = make_launcher(launch_errors=[None, TmuxError("session gone")])
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+    await supervisor.initialize(project_dir, "start here")
+
+    await supervisor.check_worker()
+
+    assert supervisor.snapshot().phase == ProjectPhase.failed
+    assert supervisor.snapshot().worker is None
+    phase_event = supervisor.recent_events(count=20)[-1]
+    assert phase_event.payload["reason"] == (
+        "recovery after the worker's pane died without a terminal report "
+        "failed: session gone"
+    )
+
+
+@pytest.mark.anyio
+async def test_check_worker_recreates_the_session_if_it_vanished(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """A recovery after the tmux session vanished creates it again."""
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+    await supervisor.initialize(project_dir, "start here")
+    tmux.sessions.clear()
+
+    await supervisor.check_worker()
+
+    assert len(tmux.created) == 2
+    assert tmux.created[1] == {
+        "session": "baton-project",
+        "start_dir": project_dir.resolve(),
+    }
+
+
+@pytest.mark.anyio
+async def test_start_runs_the_watchdog_that_polls_the_pane(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """Start's watchdog polls the pane; a live pane keeps the tick a no-op."""
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=1)])
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+    result = await supervisor.initialize(project_dir, "start here")
+
+    await supervisor.start()
+    for _ in range(3):
+        await asyncio.sleep(0)
+    await supervisor.shutdown()
+
+    assert len(tmux.pane_info_calls) >= 1
+    assert tmux.pane_info_calls[0] == result.pane_target
+    assert supervisor.snapshot().phase == ProjectPhase.running
+
+
+@pytest.mark.anyio
+async def test_shutdown_drains_a_pending_finish(
+    supervisor: Supervisor, project_dir: Path
+) -> None:
+    """Shutdown drains a finish left pending by a terminal report, with no start."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.completed, message="all done"
+    )
+
+    await supervisor.shutdown()
+
+    assert supervisor.snapshot().phase == ProjectPhase.completed
+
+
+@pytest.mark.anyio
+async def test_shutdown_without_start_returns(supervisor: Supervisor) -> None:
+    """Shutdown with no start and no initialize returns without error."""
+    await supervisor.shutdown()
+
+
+@pytest.mark.anyio
+async def test_initialize_is_refused_while_the_phase_is_recovering(
+    supervisor: Supervisor, project_dir: Path
+) -> None:
+    """Initialize is refused while the phase is recovering, with the pinned message."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.failed, message="it broke"
+    )
+    await supervisor.wait_for_finish()
+
+    expected = (
+        f"cannot initialize while the project at {project_dir.resolve()} "
+        "is 'recovering'"
+    )
+    with pytest.raises(SupervisorError, match=re.escape(expected)):
+        await supervisor.initialize(project_dir, "start again")
+
+
+@pytest.mark.anyio
+async def test_initialize_is_refused_while_the_phase_is_reconciling(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """Initialize is refused while the phase is reconciling, with the pinned message."""
+    resolved = project_dir.resolve()
+    store.save(
+        ProjectState.fresh().updated(
+            phase=ProjectPhase.reconciling,
+            project_path=resolved,
+            session_name="baton-project",
+            pane_target="baton-project:worker.0",
+            worker=WorkerRecord(
+                worker_id="worker-1",
+                prompt_path=config.state_dir / "workers" / "worker-1" / "prompt.md",
+                launched_at=datetime.now(UTC),
+                pane_pid=111,
+            ),
+        )
+    )
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+
+    expected = f"cannot initialize while the project at {resolved} is 'reconciling'"
+    with pytest.raises(SupervisorError, match=re.escape(expected)):
+        await supervisor.initialize(project_dir, "start again")
