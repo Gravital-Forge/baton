@@ -437,8 +437,11 @@ class Supervisor:
         Args:
             new_state: The state to make current.
             reason: Why the phase moved, for a transition the normal loop
-                did not choose. Carried in the phase event's payload,
-                where it is the only record of what went wrong.
+                did not choose. Carried in the phase event's payload, and
+                only there — so a reason given with a phase that does not
+                change is dropped, since no phase event is written. A
+                caller that needs the record either way appends its own
+                event first, as the vanish and reconcile paths do.
         """
         old_phase = self._state.phase
         self._state = new_state
