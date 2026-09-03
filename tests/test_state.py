@@ -122,7 +122,7 @@ def test_round_trip_with_optionals_none(store: StateStore, tmp_path: Path) -> No
         pane_target=None,
         worker=worker,
         last_report=report,
-        model="haiku",
+        model=None,
         recovery_attempts=5,
         updated_at=datetime(2026, 9, 2, 12, 0, 1, tzinfo=UTC),
     )
@@ -138,6 +138,7 @@ def test_round_trip_with_optionals_none(store: StateStore, tmp_path: Path) -> No
     assert loaded.worker.pane_pid is None
     assert loaded.last_report is not None
     assert loaded.last_report.next_prompt is None
+    assert loaded.model is None
 
 
 def _write_state_file(store: StateStore, text: str) -> None:

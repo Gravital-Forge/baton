@@ -124,9 +124,10 @@ class BatonConfig:
             ``BATON_TERMINATION_TIMEOUT``. Defaults to ``5``.
         poll_interval: Seconds between polls of the worker pane's liveness.
             Read from ``BATON_POLL_INTERVAL``. Defaults to ``2``.
-        model: The model every worker of this project runs on. Read from
-            ``BATON_MODEL``. An absent, empty, or whitespace-only value is
-            ``None``. Defaults to ``None``.
+        model: The daemon's default worker model, used when
+            ``initialize_project`` names none. Read from ``BATON_MODEL``. An
+            absent, empty, or whitespace-only value is ``None``. Defaults to
+            ``None``.
         reconciliation_timeout: Seconds baton waits for a worker to report
             its lifecycle after asking it to reconcile. Read from
             ``BATON_RECONCILIATION_TIMEOUT``. Defaults to ``300``.
