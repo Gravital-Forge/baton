@@ -38,8 +38,8 @@ The daemon runs in the foreground and serves until you stop it.
 
 ## Configure
 
-Baton reads its configuration from the environment once, at startup. Every variable below is
-optional.
+Baton reads its configuration from the environment once, at startup. Every variable below has a
+default except `BATON_MODEL`.
 
 - `BATON_HOST` — the address the MCP server binds to. Default `127.0.0.1`.
 - `BATON_PORT` — the port it listens on. Default `8910`.
@@ -53,6 +53,12 @@ optional.
 - `BATON_TERMINATION_TIMEOUT` — seconds baton waits after `SIGTERM` before it sends `SIGKILL`.
   Default `5`.
 - `BATON_POLL_INTERVAL` — seconds between polls of the worker pane. Default `2`.
+- `BATON_MODEL` — the model every worker runs on. Required unless `initialize_project` is given a
+  `model` argument; baton never lets Claude Code's own default choose it.
+- `BATON_RECONCILIATION_TIMEOUT` — seconds baton waits for a live worker to answer a
+  reconciliation request before giving up on it and starting recovery. Default `300`.
+- `BATON_RECOVERY_CAP` — the number of diagnosis workers baton launches in a row before it
+  stops and holds the project in phase `failed`. Default `3`.
 
 Baton refuses to start when it cannot find `claude` or `tmux`.
 
@@ -67,7 +73,8 @@ claude --mcp-config ~/.local/state/baton/mcp.json
 ```
 
 Then ask that session to call `initialize_project` with the project's directory and the first
-worker's prompt. That session is the setup agent; it is not a worker.
+worker's prompt, and a `model` too when `BATON_MODEL` is unset. That session is the setup agent; it
+is not a worker.
 
 ## Watch the work
 
@@ -83,14 +90,20 @@ The `=` is tmux's exact-match prefix. The worker runs in the pane
 
 ## After a restart
 
-When `initialize_project` refuses because a stopped daemon left `state.json` behind, clear it:
+A restarted daemon acts on its own, with no operator step:
 
-1. Stop the daemon.
-2. Delete `state.json` from the state directory.
-3. Start the daemon.
-4. Initialize the project again with the same session name (the default gives the same name for
-   the same project directory). The launch replaces the worker still running from before the
-   restart, without giving it a chance to report.
+- It reconciles with a worker still alive from before: it types a request into the worker's pane
+  asking for its current state, and waits a bounded time — `BATON_RECONCILIATION_TIMEOUT` — for
+  the answer.
+- It resumes a handoff it was in the middle of when it stopped.
+- It recovers a worker that died while the daemon was down, by launching a diagnosis worker in its
+  place.
 
-See "The normal loop" in [`docs/architecture.md`](docs/architecture.md) for why the daemon
-refuses.
+## Continue a stopped project
+
+Baton holds a project in phase `failed` when recovery cannot continue. Read `get_project_status`
+for the phase and the recent events, resolve the cause, then call `initialize_project` again —
+baton accepts it from `failed`.
+
+See "Recovery" and "Restart reconciliation" in [`docs/architecture.md`](docs/architecture.md) for
+how baton reaches phase `failed` and how it reconciles after a restart.

@@ -608,7 +608,7 @@ class Supervisor:
         """Launch a diagnosis worker, or stop at the recovery cap.
 
         Called with the lock held and a current worker in the state. See
-        "The normal loop" in docs/architecture.md for the recovery cycle.
+        "Recovery" in docs/architecture.md for the recovery cycle.
 
         Args:
             reason: Why recovery was triggered. Recorded as the phase

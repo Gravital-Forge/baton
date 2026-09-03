@@ -18,14 +18,19 @@ The daemon itself is built from smaller modules, each holding one part of its jo
 - **The tmux adapter and the worker launcher** (`baton/tmux.py`, `baton/worker.py`) are the only
   code that runs a subprocess. The launcher writes a worker its prompt file and its launch script,
   and respawns the pane on that script. It also installs the worker protocol skill in the project,
-  once, when the project is initialized.
-- **The worker preamble** (`baton/prompts.py`) is the short text every worker is launched with. The
-  tmux layout section describes what it sends the worker to do.
+  once, when the project is initialized. The adapter also types into a pane, which is how the
+  reconciliation request reaches a worker (see "Restart reconciliation").
+- **The prompts module** (`baton/prompts.py`) holds every fixed piece of text baton sends a worker:
+  the preamble every worker is launched with, the request a live worker answers after a restart, and
+  the prompt a diagnosis worker is launched with. The tmux layout section describes what the
+  preamble sends a worker to do; "Recovery" and "Restart reconciliation" describe the other two.
 - **The supervisor engine** (`baton/engine.py`) is the state machine. It holds the project's
   phase, decides what a report means, and owns the grace period and the termination sequence. It
   reaches tmux and `claude` only through the adapters above, so it can be tested without either.
 - **The MCP tool surface** (`baton/tools.py`, `baton/server.py`, `baton/__main__.py`) validates a
   call, delegates to the engine, and shapes the reply. It holds no state machine of its own.
+  `build_app`, in `baton/server.py`, builds the ASGI application the daemon serves; its lifespan is
+  where the supervisor starts and stops (see "Shutdown").
 
 ## The lifecycle protocol
 
@@ -36,8 +41,9 @@ on: prose in a worker's output is never a signal.
 - **`completed`** — the whole project is done.
 - **`failed`** — the task could not be done.
 - **`blocked`** — a human's input is needed.
-- **`running`** — still working. It exists for reconciliation. Baton records it as the last report
-  and moves no phase, except while the project is `blocked` (see "The normal loop").
+- **`running`** — still working. It answers baton's reconciliation request after a restart, and
+  resumes work from phase `blocked`. Baton returns the project to `running` from `blocked` or from
+  `reconciling`, and moves nothing otherwise (see "Restart reconciliation" for the request).
 
 Baton checks a report's payload against two rules, in this order, so a report that breaks both is
 refused for the message alone:
@@ -56,16 +62,16 @@ reads the tool description before it calls the tool. Change one and change the o
 ## The normal loop
 
 One daemon supervises one project at a time. `initialize_project` refuses to start a new project
-while the current one is running, blocked, or terminating.
+while the current one still has a worker running. It accepts before any project has been
+initialized, and once a project has stopped, in phase `completed` or in phase `failed`.
 
-A daemon that starts and finds `state.json` in one of those phases refuses `initialize_project` the
-same way, until somebody removes that file by hand. Baton reads `state.json` only when the daemon
-starts, so removing the file takes effect at the next start. That is also what a daemon stopped
-mid-handoff leaves behind: the worker keeps running, and the state file still says `terminating`.
-`initialize_project` then reuses that tmux session if one exists, and its launch replaces whatever
-the pane still runs (see "The tmux layout"), so the leftover worker dies without reporting.
+A daemon that starts with a project already in flight takes it over itself: it reconciles with the
+worker on record and carries the project forward from there (see "Restart reconciliation").
 
-Baton logs the loop as a sequence of events in `events.jsonl`.
+Baton logs the loop as a sequence of events in `events.jsonl`. A `launch`, `phase`, `milestone`,
+`lifecycle`, or `terminate` event marks a step of the loop below. A `vanish` event marks a worker
+whose pane died without reporting (see "Recovery"), and a `reconcile` event marks a restart's
+request to a live worker (see "Restart reconciliation").
 
 `initialize_project` launches the first worker: a `launch` event, then a `phase` event that moves
 the project to `running`. The worker calls `report_status` as it goes, and each call is a
@@ -78,13 +84,84 @@ It waits the grace period, so the worker can finish its own shutdown. It sends `
 
 What baton does next depends on which report it was. A `success` report launches the next worker
 with the prompt the last one wrote — a `launch` event, and a `phase` event back to `running`. A
-`completed` report stops the project in phase `completed`. A `failed` report stops the project in
-phase `failed`. A `blocked` report skips termination: it moves the project to phase `blocked` and
+`completed` report stops the project in phase `completed`. A `failed` report enters recovery (see
+"Recovery"). A `blocked` report skips termination: it moves the project to phase `blocked` and
 leaves the worker alive for the human who must unblock it.
 
-A `running` report makes one transition, and only this one. While the project is `blocked`, it
-returns the project to phase `running` — a `phase` event from `blocked` to `running` — and leaves
-the worker alive. From phase `running` baton records the report and moves nothing.
+A `running` report can arrive while the project is `blocked`, `reconciling`, `running`, or
+`recovering`. From `blocked` or from `reconciling` it returns the project to phase `running` — a
+`phase` event recording the move — and leaves the worker alive. From `running` or from `recovering`
+baton records the report and moves nothing.
+
+## Recovery
+
+The watchdog is a background task `Supervisor.start` creates and `shutdown` cancels. It sleeps the
+poll interval, runs one `check_worker` tick, and repeats for as long as the daemon serves. A tick
+that raises is logged and the loop goes on to the next one.
+
+The watchdog detects a vanish. On each tick, `check_worker` reads the current worker's pane. A dead
+pane found with a current worker, outside phase `terminating`, is a worker that ended without ever
+calling `report_lifecycle`. Baton appends a `vanish` event and starts recovery.
+
+A `failed` lifecycle report, a vanished pane, and a worker baton gives up on after a restart (see
+"Restart reconciliation") all reach the same recovery: baton launches a diagnosis worker into the
+project's pane and moves the project to phase `recovering`, counting the attempt.
+
+The diagnosis worker's prompt, built by `diagnosis_prompt` in `baton/prompts.py`, tells it what
+happened and the reason baton recorded, and where to look: the previous worker's prompt file, the
+project, and baton's event log. It asks for one of two outcomes: `success` with a next prompt that
+carries the work on, or `blocked` for a human to decide.
+
+Baton counts recovery attempts in `ProjectState.recovery_attempts`, and resets the count to zero
+each time a `success` report launches the next worker. `BATON_RECOVERY_CAP`, default `3` (see the
+readme), bounds how many diagnosis workers baton launches in a row without a `success` between
+them. At the cap, baton commits phase `failed` with a reason and stops. `failed` is a holding
+phase: baton does nothing further and waits for a human. `initialize_project` is accepted from it.
+
+Every launch — the first worker, the next one after a `success`, and a diagnosis worker — ensures
+the tmux session exists first, creating it if it does not. A recovery whose session died gets the
+session back.
+
+## Restart reconciliation
+
+Baton reads `state.json` only at startup. `Supervisor.reconcile` runs once, before the watchdog
+starts, and acts on the phase it loaded.
+
+A project in phase `running`, `blocked`, `recovering`, or `reconciling` has a worker whose current
+state baton does not know, so baton reads its pane. A live pane gets the reconciliation request —
+`RECONCILIATION_REQUEST` in `baton/prompts.py` — typed into it through the tmux adapter's
+`send_keys`. Baton appends a `reconcile` event carrying the timeout, starts the clock, and moves
+the project to phase `reconciling`. A dead pane is left alone: the watchdog's first tick finds it,
+records the vanish, and recovers (see "Recovery"). A project loaded in phase `uninitialized`,
+`completed`, or `failed` — or with no worker on record — needs no reconciliation, and is left
+alone.
+
+A project in phase `terminating` has a finish that never ran to completion, so it is resumed. A
+terminal last report means the worker did report before the daemon stopped, and its finish resumes
+exactly as it would have, taking its usual route. Any other last report, or none, means the
+worker's outcome is unknown, so baton terminates it with no grace period and recovers, the same as
+a vanish.
+
+A failure sending the request leaves `reconcile`, leaves `start`, and leaves the ASGI lifespan in
+`build_app` (`baton/server.py`), so the daemon never serves. A pane baton cannot type into needs a
+human, not a watchdog looping over it.
+
+Every report from `reconciling` routes as any lifecycle report does. A `running` report returns the
+project to phase `running`. A `blocked` report moves it to phase `blocked`. Each terminal report —
+`success`, `completed`, or `failed` — moves the project to phase `terminating` and then takes its
+usual route (see "The normal loop").
+
+The watchdog waits out the request. `BATON_RECONCILIATION_TIMEOUT`, default `300` seconds (see the
+readme), bounds how long a live pane has to answer before baton gives up on it, terminates it with
+no grace period, and recovers. That deadline lives in memory, not in `state.json` — a second
+restart starts the clock over.
+
+## Shutdown
+
+The ASGI lifespan calls `Supervisor.shutdown` once it stops serving. `shutdown` cancels the
+watchdog, then drains any finish still pending, so a termination already in flight — the grace
+period, the signal, and the route or recovery that follows — runs to completion before the process
+exits.
 
 ## The tmux layout
 
@@ -102,14 +179,9 @@ what sends the worker to the installed skill and tells it to read its id out of 
 
 The state directory holds:
 
-- `state.json` — the project's current phase, worker, and last report.
+- `state.json` — the project's current phase, worker, and last report, the model every worker of
+  the project runs on, and the recovery attempt count.
 - `events.jsonl` — the append-only log that `get_project_status` reads back.
 - `mcp.json` — the MCP client config a worker's Claude Code session is pointed at.
 - `workers/<worker id>/` — the `prompt.md` a worker was launched with, and the `launch.sh` that
   ran it. These files stay after the worker ends, as the record of what ran.
-
-## Failure behavior
-
-The normal loop above covers what happens to a `failed` report. Beyond that, baton does not detect
-a worker that exits without reporting, does not launch a worker to investigate a failure, and does
-not reconcile with a live worker after a restart.

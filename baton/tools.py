@@ -141,11 +141,15 @@ class BatonTools:
           prompt; baton launches a fresh worker with it.
         - ``completed``: the whole project is done, not just this task.
         - ``failed``: you could not complete the task. Say what went wrong.
+          Baton terminates you and launches a diagnosis worker to
+          investigate.
         - ``blocked``: you need a human's input. You stay alive for that human
           and report again once the work can move.
-        - ``running``: you are still working. It is for reconciliation:
-          baton records it as the last report and moves no phase, except
-          from ``blocked``, which it returns to ``running``.
+        - ``running``: you are still working. It answers baton's
+          reconciliation request after a restart and resumes work from
+          ``blocked``: baton returns the project to ``running`` from
+          ``blocked`` or from ``reconciling``, and moves no phase
+          otherwise.
 
         The payload rules, in the order baton checks them. The message rule is
         checked first, so a report that breaks both is refused for the message
