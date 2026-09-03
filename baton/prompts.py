@@ -57,9 +57,8 @@ def diagnosis_prompt(
         The prompt text to launch the diagnosis worker with.
     """
     return (
-        f"Worker {previous_worker_id} ended abnormally. Baton did not get a "
-        f"terminal lifecycle report from it; the reason baton recorded is: "
-        f"{reason}\n\n"
+        f"Worker {previous_worker_id} ended abnormally. The reason baton "
+        f"recorded is: {reason}\n\n"
         f"You are diagnosis attempt {attempt} of {cap}. Past that cap, with "
         f"no successful worker in between, baton stops launching diagnosis "
         f"workers and waits for a human.\n\n"

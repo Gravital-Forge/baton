@@ -131,8 +131,9 @@ class BatonConfig:
         reconciliation_timeout: Seconds baton waits for a worker to report
             its lifecycle after asking it to reconcile. Read from
             ``BATON_RECONCILIATION_TIMEOUT``. Defaults to ``300``.
-        recovery_cap: The number of diagnosis workers baton launches for a
-            project before it stops and waits for a human. Read from
+        recovery_cap: The number of diagnosis workers baton launches
+            consecutively for a project — a success report resets the
+            count — before it stops and waits for a human. Read from
             ``BATON_RECOVERY_CAP``. Defaults to ``3``.
     """
 

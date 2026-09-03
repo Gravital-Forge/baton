@@ -144,3 +144,17 @@ def test_diagnosis_prompt_states_attempt_against_cap(
     """diagnosis_prompt's return states the attempt count against the cap."""
     prompt = diagnosis_prompt(**diagnosis_kwargs)
     assert "attempt 2 of 3" in prompt
+
+
+def test_diagnosis_prompt_does_not_claim_no_terminal_report(
+    diagnosis_kwargs: dict[str, object],
+) -> None:
+    """diagnosis_prompt's return says only that the worker ended abnormally.
+
+    It must not also claim baton got no terminal lifecycle report: a
+    ``failed`` report is itself terminal, so that claim is false on the
+    route where the previous worker reported failed.
+    """
+    prompt = diagnosis_prompt(**diagnosis_kwargs)
+    assert "ended abnormally" in prompt
+    assert "did not get a terminal lifecycle report" not in prompt
