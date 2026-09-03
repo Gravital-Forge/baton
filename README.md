@@ -105,7 +105,8 @@ baton reads the dead pane as a worker that vanished and recovers it.
 
 An upgrade can need you too: a daemon that fails to start with a `KeyError` is reading a
 `state.json` that an earlier version of baton wrote. Delete `state.json` from the state directory,
-start the daemon again, and call `initialize_project` to pick the project back up.
+start the daemon again, and call `initialize_project` to pick the project back up — the launch
+replaces any worker still running in that session, without giving it a chance to report.
 
 ## Continue a stopped project
 

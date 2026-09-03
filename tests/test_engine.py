@@ -1710,7 +1710,10 @@ async def test_a_failed_report_from_reconciling_terminates_and_recovers(
         assert state.phase == ProjectPhase.recovering
         assert state.recovery_attempts == 1
         assert state.worker is not None
-        assert state.worker.worker_id == "worker-1"
+        # FakeLauncher's default pid (4242) differs from the persisted
+        # worker's (111); an unchanged pid would mean recovery never
+        # launched a replacement.
+        assert state.worker.pane_pid != worker.pane_pid
 
 
 @pytest.mark.anyio
