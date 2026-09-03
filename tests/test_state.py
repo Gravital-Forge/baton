@@ -24,6 +24,8 @@ GOOD_STATE_JSON = {
     "pane_target": None,
     "worker": None,
     "last_report": None,
+    "model": None,
+    "recovery_attempts": 0,
     "updated_at": "2026-09-02T16:00:00+00:00",
 }
 
@@ -56,6 +58,8 @@ def populated_state(tmp_path: Path) -> ProjectState:
         pane_target="baton:worker.0",
         worker=worker,
         last_report=report,
+        model="sonnet",
+        recovery_attempts=2,
         updated_at=datetime(2026, 9, 2, 16, 0, 1, tzinfo=UTC),
     )
 
@@ -118,6 +122,8 @@ def test_round_trip_with_optionals_none(store: StateStore, tmp_path: Path) -> No
         pane_target=None,
         worker=worker,
         last_report=report,
+        model="haiku",
+        recovery_attempts=5,
         updated_at=datetime(2026, 9, 2, 12, 0, 1, tzinfo=UTC),
     )
 
@@ -173,6 +179,15 @@ def test_load_rejects_a_state_file_missing_a_key(store: StateStore) -> None:
     """load() raises KeyError when state.json lacks a required key."""
     without_phase = {k: v for k, v in GOOD_STATE_JSON.items() if k != "phase"}
     _write_state_file(store, json.dumps(without_phase))
+
+    with pytest.raises(KeyError):
+        store.load()
+
+
+def test_load_rejects_a_state_file_missing_model(store: StateStore) -> None:
+    """load() raises KeyError when state.json lacks the model key."""
+    without_model = {k: v for k, v in GOOD_STATE_JSON.items() if k != "model"}
+    _write_state_file(store, json.dumps(without_model))
 
     with pytest.raises(KeyError):
         store.load()
@@ -235,6 +250,8 @@ def test_on_disk_json_has_pinned_shape(
         "pane_target",
         "worker",
         "last_report",
+        "model",
+        "recovery_attempts",
         "updated_at",
     ]
     assert raw["phase"] == "running"
@@ -257,6 +274,8 @@ def test_on_disk_json_has_pinned_shape(
     assert raw["last_report"]["state"] == "success"
     assert raw["last_report"]["message"] == "did the thing"
     assert raw["last_report"]["next_prompt"] == "do the next thing"
+    assert raw["model"] == "sonnet"
+    assert raw["recovery_attempts"] == 2
     assert raw["updated_at"] == populated_state.updated_at.isoformat()
     assert raw_text.endswith("\n")
     assert not raw_text.endswith("\n\n")

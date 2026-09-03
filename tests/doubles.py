@@ -30,6 +30,7 @@ class FakeTmux:
         pane_infos: Sequence[PaneInfo] = (),
         create_error: Exception | None = None,
         kill_errors: Sequence[Exception | None] = (),
+        send_error: Exception | None = None,
     ) -> None:
         """Store the scripted sessions, pane readings, and errors.
 
@@ -43,16 +44,20 @@ class FakeTmux:
             kill_errors: What `signal_pane` raises on each call, in call
                 order, where `None` is a signal that lands. The last entry
                 repeats once they run out.
+            send_error: The exception `send_keys` raises, when set, instead
+                of recording the call.
         """
         self.sessions: set[str] = set(sessions)
         self._pane_infos = list(pane_infos)
         self._create_error = create_error
         self._kill_errors = list(kill_errors)
+        self._send_error = send_error
         self.has_session_calls: list[str] = []
         self.created: list[dict[str, object]] = []
         self.respawn_calls: list[dict[str, object]] = []
         self.pane_info_calls: list[str] = []
         self.signals: list[tuple[int, int]] = []
+        self.send_keys_calls: list[tuple[str, str]] = []
 
     def has_session(self, session: str) -> bool:
         """Record the query and report whether the named session exists.
@@ -100,6 +105,20 @@ class FakeTmux:
                 "command": command,
             }
         )
+
+    def send_keys(self, target: str, text: str) -> None:
+        """Record the call, or raise the scripted error.
+
+        Args:
+            target: The pane target that was typed into.
+            text: The text that was typed.
+
+        Raises:
+            Exception: `send_error`, when one was scripted.
+        """
+        if self._send_error is not None:
+            raise self._send_error
+        self.send_keys_calls.append((target, text))
 
     def pane_info(self, target: str) -> PaneInfo:
         """Record the query and return the next scripted `PaneInfo`.

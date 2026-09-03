@@ -1,8 +1,14 @@
-"""Tests for baton.prompts: the worker preamble and the packaged skill file."""
+"""Tests for baton.prompts.
+
+Covers the worker preamble, the reconciliation request, the diagnosis
+prompt builder, and the packaged skill file.
+"""
+
+from pathlib import Path
 
 import pytest
 
-from baton.prompts import WORKER_PREAMBLE
+from baton.prompts import RECONCILIATION_REQUEST, WORKER_PREAMBLE, diagnosis_prompt
 
 TOOL_SIGNATURES = [
     "initialize_project(project_path, initial_prompt, session_name=None)",
@@ -71,3 +77,70 @@ def test_packaged_skill_names_each_tool(skill_text: str, tool_signature: str) ->
 def test_packaged_skill_names_each_lifecycle_state(skill_text: str, state: str) -> None:
     """The packaged skill body names each of baton's lifecycle states."""
     assert state in skill_text
+
+
+def test_reconciliation_request_has_no_newline() -> None:
+    """RECONCILIATION_REQUEST is one line: it carries no newline."""
+    assert "\n" not in RECONCILIATION_REQUEST
+
+
+@pytest.mark.parametrize("term", ["report_lifecycle", "running", "blocked"])
+def test_reconciliation_request_names_each_term(term: str) -> None:
+    """RECONCILIATION_REQUEST names the tool and the states it asks about."""
+    assert term in RECONCILIATION_REQUEST
+
+
+REASON = "the tmux pane vanished without a terminal lifecycle report"
+
+
+@pytest.fixture
+def diagnosis_kwargs(tmp_path: Path) -> dict[str, object]:
+    """Build a full set of `diagnosis_prompt` arguments under `tmp_path`.
+
+    Args:
+        tmp_path: Pytest's per-test temporary directory.
+
+    Returns:
+        The keyword arguments `diagnosis_prompt` takes, with every path
+        argument a real absolute path under `tmp_path` and `attempt`/`cap`
+        set to 2 and 3.
+    """
+    return {
+        "project_path": tmp_path / "project",
+        "previous_worker_id": "worker-f3c9a1",
+        "previous_prompt_path": tmp_path / "state" / "prompts" / "worker-f3c9a1.txt",
+        "reason": REASON,
+        "events_path": tmp_path / "state" / "events.jsonl",
+        "attempt": 2,
+        "cap": 3,
+    }
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "previous_worker_id",
+        "reason",
+        "project_path",
+        "previous_prompt_path",
+        "events_path",
+    ],
+)
+def test_diagnosis_prompt_contains_each_argument_value(
+    diagnosis_kwargs: dict[str, object], key: str
+) -> None:
+    """diagnosis_prompt's return contains each argument's value.
+
+    A path argument appears as its `str`; `previous_worker_id` and `reason`
+    are already strings.
+    """
+    prompt = diagnosis_prompt(**diagnosis_kwargs)
+    assert str(diagnosis_kwargs[key]) in prompt
+
+
+def test_diagnosis_prompt_states_attempt_against_cap(
+    diagnosis_kwargs: dict[str, object],
+) -> None:
+    """diagnosis_prompt's return states the attempt count against the cap."""
+    prompt = diagnosis_prompt(**diagnosis_kwargs)
+    assert "attempt 2 of 3" in prompt

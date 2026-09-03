@@ -175,6 +175,22 @@ class TmuxAdapter:
         argv.append(command)
         self._run_checked(argv)
 
+    def send_keys(self, target: str, text: str) -> None:
+        """Type one line of text into a pane, then press Enter.
+
+        Args:
+            target: The pane to type into, e.g. `"<session>:worker"`.
+            text: The text to type. Sent literally, with `-l`, so tmux
+                performs no key-name lookup on it.
+
+        Raises:
+            TmuxError: If either the literal send or the Enter key press
+                exits non-zero.
+        """
+        exact = _exact_target(target)
+        self._run_checked([self._tmux, "send-keys", "-l", "-t", exact, text])
+        self._run_checked([self._tmux, "send-keys", "-t", exact, "Enter"])
+
     def pane_info(self, target: str) -> PaneInfo:
         """Read a pane's liveness and process ID.
 

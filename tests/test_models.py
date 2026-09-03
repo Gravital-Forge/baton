@@ -77,6 +77,8 @@ def test_lifecycle_state_members_spell_their_value(
     [
         (ProjectPhase.uninitialized, "uninitialized"),
         (ProjectPhase.running, "running"),
+        (ProjectPhase.recovering, "recovering"),
+        (ProjectPhase.reconciling, "reconciling"),
         (ProjectPhase.blocked, "blocked"),
         (ProjectPhase.terminating, "terminating"),
         (ProjectPhase.completed, "completed"),
@@ -97,6 +99,8 @@ def test_project_phase_members_spell_their_value(
         (EventKind.lifecycle, "lifecycle"),
         (EventKind.launch, "launch"),
         (EventKind.terminate, "terminate"),
+        (EventKind.vanish, "vanish"),
+        (EventKind.reconcile, "reconcile"),
         (EventKind.phase, "phase"),
     ],
 )
@@ -316,6 +320,8 @@ def test_project_state_fresh_is_uninitialized() -> None:
     assert state.pane_target is None
     assert state.worker is None
     assert state.last_report is None
+    assert state.model is None
+    assert state.recovery_attempts == 0
 
 
 def test_project_state_fresh_updated_at_is_timezone_aware_utc() -> None:
@@ -402,6 +408,8 @@ def test_project_state_to_dict_maps_every_field(tmp_path: Path) -> None:
         last_report=LifecycleReport(
             state=LifecycleState.success, message="done", next_prompt="next"
         ),
+        model="sonnet",
+        recovery_attempts=2,
         updated_at=datetime(2026, 9, 2, 12, 5, tzinfo=UTC),
     )
 
@@ -421,6 +429,8 @@ def test_project_state_to_dict_maps_every_field(tmp_path: Path) -> None:
             "message": "done",
             "next_prompt": "next",
         },
+        "model": "sonnet",
+        "recovery_attempts": 2,
         "updated_at": "2026-09-02T12:05:00+00:00",
     }
 
@@ -434,6 +444,8 @@ def test_project_state_to_dict_preserves_absent_fields_as_none() -> None:
         pane_target=None,
         worker=None,
         last_report=None,
+        model=None,
+        recovery_attempts=0,
         updated_at=datetime(2026, 9, 2, 12, 0, tzinfo=UTC),
     )
 
@@ -444,6 +456,8 @@ def test_project_state_to_dict_preserves_absent_fields_as_none() -> None:
         "pane_target": None,
         "worker": None,
         "last_report": None,
+        "model": None,
+        "recovery_attempts": 0,
         "updated_at": "2026-09-02T12:00:00+00:00",
     }
 

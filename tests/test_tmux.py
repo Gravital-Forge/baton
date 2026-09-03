@@ -245,3 +245,36 @@ def test_signal_pane_calls_os_kill_with_pid_and_signal(
     adapter.signal_pane(4321, 15)
 
     assert calls == [(4321, 15)]
+
+
+def test_send_keys_issues_literal_send_then_enter() -> None:
+    """Sending text runs a literal send-keys, then a separate Enter key-name send."""
+    runner = FakeRunner([_completed([], 0), _completed([], 0)])
+    adapter = TmuxAdapter(TMUX_BIN, runner)
+
+    adapter.send_keys("baton-1:worker", "the text")
+
+    assert runner.calls == [
+        [TMUX, "send-keys", "-l", "-t", "=baton-1:worker", "the text"],
+        [TMUX, "send-keys", "-t", "=baton-1:worker", "Enter"],
+    ]
+
+
+def test_send_keys_raises_tmux_error_when_literal_send_fails() -> None:
+    """A non-zero exit from the literal send raises TmuxError, without an Enter call."""
+    runner = FakeRunner([_completed([], 1, stderr="no such pane")])
+    adapter = TmuxAdapter(TMUX_BIN, runner)
+
+    with pytest.raises(TmuxError, match="no such pane"):
+        adapter.send_keys("baton-1:worker", "the text")
+
+    assert len(runner.calls) == 1
+
+
+def test_send_keys_raises_tmux_error_when_enter_send_fails() -> None:
+    """A non-zero exit from the Enter send raises TmuxError."""
+    runner = FakeRunner([_completed([], 0), _completed([], 1, stderr="no such pane")])
+    adapter = TmuxAdapter(TMUX_BIN, runner)
+
+    with pytest.raises(TmuxError, match="no such pane"):
+        adapter.send_keys("baton-1:worker", "the text")
