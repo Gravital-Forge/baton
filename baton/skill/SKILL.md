@@ -57,8 +57,8 @@ are still working on the task: it tells baton nothing has to change. From
 Every report you make carries your own worker id, from the `BATON_WORKER_ID`
 environment variable: `report_status` and `report_lifecycle` both take it.
 
-- `initialize_project(project_path, initial_prompt, session_name=None)` — creates a
-  project and launches its first worker. The setup agent calls this, not you.
+- `initialize_project(project_path, initial_prompt, session_name=None, model=None)` —
+  creates a project and launches its first worker. The setup agent calls this, not you.
 - `report_status(worker_id, message)` — records a milestone.
 - `report_lifecycle(worker_id, state, message=None, next_prompt=None)` — reports
   your lifecycle state. The only call baton acts on.

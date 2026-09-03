@@ -68,7 +68,11 @@ class Supervisor:
         self._finish_task: asyncio.Task[None] | None = None
 
     async def initialize(
-        self, project_path: Path, initial_prompt: str, session_name: str | None = None
+        self,
+        project_path: Path,
+        initial_prompt: str,
+        session_name: str | None = None,
+        model: str | None = None,
     ) -> ProjectState:
         """Start a new project by launching its first worker.
 
@@ -81,6 +85,8 @@ class Supervisor:
             initial_prompt: The prompt the first worker is launched with.
             session_name: The tmux session to use, or None to derive one
                 from the project directory's name.
+            model: The model every worker of this project runs on, or
+                None to use the daemon's configured default (`BATON_MODEL`).
 
         Returns:
             The committed ProjectState, in phase running.
@@ -88,7 +94,9 @@ class Supervisor:
         Raises:
             SupervisorError: If a project is already running, blocked, or
                 terminating; if project_path is not an existing directory;
-                or if initial_prompt or a given session_name is blank.
+                if initial_prompt, a given session_name, or a given model
+                is blank; or if model is None and no default is
+                configured.
         """
         async with self._lock:
             if self._state.phase in (
@@ -114,6 +122,14 @@ class Supervisor:
                 raise SupervisorError(
                     f"session name must not be blank, got {session_name!r}"
                 )
+            if model is not None and model.strip() == "":
+                raise SupervisorError(f"model must not be blank, got {model!r}")
+            chosen_model = model if model is not None else self._config.model
+            if chosen_model is None:
+                raise SupervisorError(
+                    "no model chosen: pass model to initialize_project or set "
+                    "BATON_MODEL"
+                )
 
             session = (
                 session_name if session_name is not None else f"baton-{resolved.name}"
@@ -126,7 +142,9 @@ class Supervisor:
             if not self._tmux.has_session(session=session):
                 self._tmux.create_session(session=session, start_dir=resolved)
 
-            record = self._launch_worker(resolved, pane_target, initial_prompt)
+            record = self._launch_worker(
+                resolved, pane_target, initial_prompt, chosen_model
+            )
             self._commit(
                 ProjectState.fresh().updated(
                     phase=ProjectPhase.running,
@@ -134,6 +152,7 @@ class Supervisor:
                     session_name=session,
                     pane_target=pane_target,
                     worker=record,
+                    model=chosen_model,
                 )
             )
             return self._state
@@ -300,7 +319,7 @@ class Supervisor:
         self._store.append_event(EventKind.phase, None, payload)
 
     def _launch_worker(
-        self, project_path: Path, pane_target: str, prompt: str
+        self, project_path: Path, pane_target: str, prompt: str, model: str
     ) -> WorkerRecord:
         """Launch a worker into the project's pane and log the launch.
 
@@ -308,12 +327,16 @@ class Supervisor:
             project_path: The directory the worker's pane starts in.
             pane_target: The tmux pane the worker is launched into.
             prompt: The task prompt the worker is launched with.
+            model: The model the worker is launched with.
 
         Returns:
             The record of the launched worker.
         """
         record = self._launcher.launch(
-            project_path=project_path, pane_target=pane_target, prompt=prompt
+            project_path=project_path,
+            pane_target=pane_target,
+            prompt=prompt,
+            model=model,
         )
         self._store.append_event(
             EventKind.launch,
@@ -388,6 +411,7 @@ class Supervisor:
                 self._state.project_path,
                 self._state.pane_target,
                 report.next_prompt,
+                self._state.model,
             )
             self._commit(self._state.updated(phase=ProjectPhase.running, worker=record))
         elif report.state == LifecycleState.completed:

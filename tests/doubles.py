@@ -181,13 +181,16 @@ class FakeLauncher:
         self.launches: list[dict[str, object]] = []
         self.installs: list[Path] = []
 
-    def launch(self, project_path: Path, pane_target: str, prompt: str) -> WorkerRecord:
+    def launch(
+        self, project_path: Path, pane_target: str, prompt: str, model: str
+    ) -> WorkerRecord:
         """Record the call, write the prompt file, and return a worker record.
 
         Args:
             project_path: The directory the worker's pane starts in.
             pane_target: The tmux pane the worker is launched into.
             prompt: The task prompt given to the worker.
+            model: The model the worker is launched with.
 
         Returns:
             A `WorkerRecord` naming this launch's worker, in launch order.
@@ -201,6 +204,7 @@ class FakeLauncher:
                 "project_path": project_path,
                 "pane_target": pane_target,
                 "prompt": prompt,
+                "model": model,
             }
         )
         worker_id = f"worker-{len(self.launches)}"
@@ -245,9 +249,9 @@ class StubSupervisor:
     """A stand-in for `Supervisor` that records calls and can raise on cue.
 
     Each of the four methods `BatonTools` delegates to records the
-    arguments it received, unless a scripted `SupervisorError` was given
-    for it, in which case it raises that instead. `snapshot` and
-    `recent_events` always return what was scripted.
+    arguments it received, unless a scripted error was given for it, in
+    which case it raises that instead. `snapshot` and `recent_events`
+    always return what was scripted.
     """
 
     def __init__(
@@ -255,7 +259,7 @@ class StubSupervisor:
         *,
         state: ProjectState | None = None,
         events: list[Event] | None = None,
-        initialize_error: SupervisorError | None = None,
+        initialize_error: Exception | None = None,
         record_status_error: SupervisorError | None = None,
         report_lifecycle_error: SupervisorError | None = None,
     ) -> None:
@@ -267,7 +271,8 @@ class StubSupervisor:
                 Defaults to `ProjectState.fresh()`.
             events: The events `recent_events` returns. Defaults to none.
             initialize_error: The error `initialize` raises, when set,
-                instead of recording its call.
+                instead of recording its call. Widened beyond
+                `SupervisorError` so a test can script a `TmuxError`.
             record_status_error: The error `record_status` raises, when
                 set, instead of recording its call.
             report_lifecycle_error: The error `report_lifecycle` raises,
@@ -288,6 +293,7 @@ class StubSupervisor:
         project_path: Path,
         initial_prompt: str,
         session_name: str | None = None,
+        model: str | None = None,
     ) -> ProjectState:
         """Record the call and return the scripted state, or raise.
 
@@ -295,12 +301,13 @@ class StubSupervisor:
             project_path: The project directory passed in.
             initial_prompt: The initial prompt passed in.
             session_name: The session name passed in.
+            model: The model passed in.
 
         Returns:
             The scripted state.
 
         Raises:
-            SupervisorError: `initialize_error`, when one was scripted.
+            Exception: `initialize_error`, when one was scripted.
         """
         if self._initialize_error is not None:
             raise self._initialize_error
@@ -309,6 +316,7 @@ class StubSupervisor:
                 "project_path": project_path,
                 "initial_prompt": initial_prompt,
                 "session_name": session_name,
+                "model": model,
             }
         )
         return self._state

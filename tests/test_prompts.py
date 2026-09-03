@@ -11,7 +11,7 @@ import pytest
 from baton.prompts import RECONCILIATION_REQUEST, WORKER_PREAMBLE, diagnosis_prompt
 
 TOOL_SIGNATURES = [
-    "initialize_project(project_path, initial_prompt, session_name=None)",
+    "initialize_project(project_path, initial_prompt, session_name=None, model=None)",
     "report_status(worker_id, message)",
     "report_lifecycle(worker_id, state, message=None, next_prompt=None)",
     "get_project_status()",

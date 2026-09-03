@@ -130,6 +130,7 @@ async def test_initialize_launches_the_first_worker_and_records_phase_running(
         "project_path": resolved,
         "pane_target": expected_pane_target,
         "prompt": "start here",
+        "model": "sonnet",
     }
 
 
@@ -292,6 +293,121 @@ async def test_initialize_is_refused_for_a_blank_session_name(
     assert supervisor.snapshot().phase == ProjectPhase.uninitialized
     assert launcher.installs == []
     assert not (config.state_dir / "mcp.json").exists()
+
+
+@pytest.mark.anyio
+async def test_initialize_with_explicit_model_reaches_the_state_and_the_launcher(
+    config: BatonConfig,
+    launcher: FakeLauncher,
+    supervisor: Supervisor,
+    project_dir: Path,
+) -> None:
+    """An explicit model is recorded in the state and reaches the launcher."""
+    result = await supervisor.initialize(project_dir, "start here", model="opus")
+
+    assert result.model == "opus"
+    assert StateStore(config.state_dir).load().model == "opus"
+    assert launcher.launches[0]["model"] == "opus"
+
+
+@pytest.mark.anyio
+async def test_initialize_with_no_model_argument_uses_the_configurations_model(
+    config: BatonConfig,
+    launcher: FakeLauncher,
+    supervisor: Supervisor,
+    project_dir: Path,
+) -> None:
+    """With no model argument, the configuration's model is used."""
+    result = await supervisor.initialize(project_dir, "start here")
+
+    assert result.model == config.model
+    assert launcher.launches[0]["model"] == config.model
+
+
+@pytest.mark.anyio
+async def test_initialize_model_argument_outranks_the_configurations_model(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """A model argument outranks the configuration's model."""
+    supervisor = Supervisor(
+        config=replace(config, model="haiku"), store=store, tmux=tmux, launcher=launcher
+    )
+
+    result = await supervisor.initialize(project_dir, "start here", model="opus")
+
+    assert result.model == "opus"
+    assert launcher.launches[0]["model"] == "opus"
+
+
+@pytest.mark.anyio
+async def test_initialize_with_no_model_source_is_refused(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """No model argument and no configured model is refused with the pinned message."""
+    supervisor = Supervisor(
+        config=replace(config, model=None), store=store, tmux=tmux, launcher=launcher
+    )
+
+    expected = "no model chosen: pass model to initialize_project or set BATON_MODEL"
+    with pytest.raises(SupervisorError, match=re.escape(expected)):
+        await supervisor.initialize(project_dir, "start here")
+
+    assert supervisor.snapshot().phase == ProjectPhase.uninitialized
+    assert launcher.installs == []
+    assert not (config.state_dir / "mcp.json").exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("model", ["", "  \n\t "])
+async def test_initialize_is_refused_for_a_blank_model_argument(
+    config: BatonConfig,
+    launcher: FakeLauncher,
+    supervisor: Supervisor,
+    project_dir: Path,
+    model: str,
+) -> None:
+    """A blank model argument is refused before anything is written."""
+    expected = f"model must not be blank, got {model!r}"
+
+    with pytest.raises(SupervisorError, match=re.escape(expected)):
+        await supervisor.initialize(project_dir, "start here", model=model)
+
+    assert supervisor.snapshot().phase == ProjectPhase.uninitialized
+    assert launcher.installs == []
+    assert not (config.state_dir / "mcp.json").exists()
+
+
+@pytest.mark.anyio
+async def test_success_handoff_launches_on_the_states_model_not_the_configurations(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """A success handoff launches on the state's model, not the configuration's."""
+    supervisor = Supervisor(
+        config=replace(config, model="haiku"), store=store, tmux=tmux, launcher=launcher
+    )
+    result = await supervisor.initialize(project_dir, "start here", model="opus")
+
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+    )
+    await supervisor.wait_for_finish()
+
+    assert launcher.launches[1]["model"] == "opus"
 
 
 @pytest.mark.anyio
