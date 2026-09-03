@@ -100,8 +100,8 @@ poll interval, runs one `check_worker` tick, and repeats for as long as the daem
 that raises is logged and the loop goes on to the next one.
 
 The watchdog detects a vanish. On each tick, `check_worker` reads the current worker's pane. A dead
-pane found with a current worker, outside phase `terminating`, is a worker that ended without ever
-calling `report_lifecycle`. Baton appends a `vanish` event and starts recovery.
+pane found with a current worker, outside phase `terminating`, is a worker that ended without a
+terminal report. Baton appends a `vanish` event and starts recovery.
 
 A `failed` lifecycle report, a vanished pane, and a worker baton gives up on after a restart (see
 "Restart reconciliation") all reach the same recovery: baton launches a diagnosis worker into the
@@ -113,10 +113,12 @@ project, and baton's event log. It asks for one of two outcomes: `success` with 
 carries the work on, or `blocked` for a human to decide.
 
 Baton counts recovery attempts in `ProjectState.recovery_attempts`, and resets the count to zero
-each time a `success` report launches the next worker. `BATON_RECOVERY_CAP`, default `3` (see the
-readme), bounds how many diagnosis workers baton launches in a row without a `success` between
-them. At the cap, baton commits phase `failed` with a reason and stops. `failed` is a holding
-phase: baton does nothing further and waits for a human. `initialize_project` is accepted from it.
+each time a `success` report launches the next worker. `BATON_RECOVERY_CAP` (see the readme)
+bounds how many diagnosis workers baton launches in a row without a `success` between them. At the
+cap, baton commits phase `failed` with a reason and stops. It commits `failed` with a reason too
+when its own machinery raises — a handoff, an abnormal finish, or a recovery launch. `failed` is a
+holding phase: baton does nothing further and waits for a human. `initialize_project` is accepted
+from it.
 
 Every launch — the first worker, the next one after a `success`, and a diagnosis worker — ensures
 the tmux session exists first, creating it if it does not. A recovery whose session died gets the
@@ -142,19 +144,19 @@ exactly as it would have, taking its usual route. Any other last report, or none
 worker's outcome is unknown, so baton terminates it with no grace period and recovers, the same as
 a vanish.
 
-A failure sending the request leaves `reconcile`, leaves `start`, and leaves the ASGI lifespan in
-`build_app` (`baton/server.py`), so the daemon never serves. A pane baton cannot type into needs a
-human, not a watchdog looping over it.
+A failure sending the request propagates out of `reconcile`, out of `start`, and out of the ASGI
+lifespan in `build_app` (`baton/server.py`), so the daemon never serves. A pane baton cannot type
+into needs a human, not a watchdog looping over it.
 
 Every report from `reconciling` routes as any lifecycle report does. A `running` report returns the
 project to phase `running`. A `blocked` report moves it to phase `blocked`. Each terminal report —
 `success`, `completed`, or `failed` — moves the project to phase `terminating` and then takes its
 usual route (see "The normal loop").
 
-The watchdog waits out the request. `BATON_RECONCILIATION_TIMEOUT`, default `300` seconds (see the
-readme), bounds how long a live pane has to answer before baton gives up on it, terminates it with
-no grace period, and recovers. That deadline lives in memory, not in `state.json` — a second
-restart starts the clock over.
+The watchdog waits out the request. `BATON_RECONCILIATION_TIMEOUT` (see the readme) bounds how
+long a live pane has to answer before baton gives up on it, terminates it with no grace period,
+and recovers. That deadline lives in memory, not in `state.json` — a second restart starts the
+clock over.
 
 ## Shutdown
 
@@ -171,9 +173,15 @@ in place, and an attached human's view survives the handoff. Pane death is worke
 reads the pane's own state rather than trusting a recorded process id.
 
 Baton puts the worker's id in the pane environment as `BATON_WORKER_ID`. The pane runs the
-worker's `launch.sh`, which `exec`s `claude` with that id as its `--session-id`, with `mcp.json` as
-its `--mcp-config`, and with the worker preamble appended to its system prompt. The preamble is
-what sends the worker to the installed skill and tells it to read its id out of the environment.
+worker's `launch.sh`, which `exec`s `claude` with that id as its `--session-id`, with the project's
+model as its `--model`, with `mcp.json` as its `--mcp-config`, and with the worker preamble appended
+to its system prompt. The preamble is what sends the worker to the installed skill and tells it to
+read its id out of the environment.
+
+The model is chosen once, when `initialize_project` runs: the call's `model` argument, else the
+daemon's `BATON_MODEL`. Baton refuses to initialize when neither names one, so Claude Code's own
+default never decides. The chosen model goes into `state.json` and launches every later worker of
+that project, diagnosis workers included.
 
 ## The state directory
 

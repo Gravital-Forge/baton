@@ -90,20 +90,25 @@ The `=` is tmux's exact-match prefix. The worker runs in the pane
 
 ## After a restart
 
-A restarted daemon acts on its own, with no operator step:
+A restarted daemon carries the project forward on its own:
 
 - It reconciles with a worker still alive from before: it types a request into the worker's pane
   asking for its current state, and waits a bounded time — `BATON_RECONCILIATION_TIMEOUT` — for
   the answer.
 - It resumes a handoff it was in the middle of when it stopped.
 - It recovers a worker that died while the daemon was down, by launching a diagnosis worker in its
-  place.
+  place — up to the recovery cap.
+
+One restart needs you. When baton cannot type into a live worker's pane, it stops with the tmux
+error instead of serving. Kill that pane, or its whole tmux session, and start the daemon again:
+baton reads the dead pane as a worker that vanished and recovers it.
 
 ## Continue a stopped project
 
-Baton holds a project in phase `failed` when recovery cannot continue. Read `get_project_status`
-for the phase and the recent events, resolve the cause, then call `initialize_project` again —
-baton accepts it from `failed`.
+Baton holds a project in phase `failed` when it cannot carry the work forward on its own. Read
+`get_project_status` for the phase and the recent events; the phase event that moved the project to
+`failed` carries baton's reason. Resolve the cause, then call `initialize_project` again — baton
+accepts it from `failed`.
 
 See "Recovery" and "Restart reconciliation" in [`docs/architecture.md`](docs/architecture.md) for
 how baton reaches phase `failed` and how it reconciles after a restart.

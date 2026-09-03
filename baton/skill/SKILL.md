@@ -33,6 +33,8 @@ The states:
 - **`blocked`** — you need a human's input to continue. You stay alive for that
   human, and you report `running` once the work can move, which tells baton you
   are working again and returns the project to `running`.
+- **`running`** — you are still working. Report it to answer baton's
+  reconciliation request, or to resume from `blocked`.
 
 Every report except `running` carries a message that says what happened. Baton
 rejects a report without one.
@@ -63,8 +65,9 @@ diagnosis worker.
 
 A diagnosis worker is an ordinary worker, launched to take over when the worker
 before it failed or ended without reporting. Its prompt says what happened and
-points it at the previous worker's prompt, the project, and baton's event log. It
-reports one of two outcomes: `success` with a next prompt, or `blocked`.
+points it at the previous worker's prompt, the project, and baton's event log.
+Baton asks it for one of two outcomes: `success` with a next prompt, or
+`blocked`.
 
 ## Baton's tools
 

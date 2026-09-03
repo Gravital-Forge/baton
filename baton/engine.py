@@ -1,7 +1,9 @@
 """The supervisor engine driving baton's worker lifecycle.
 
-See "The lifecycle protocol" and "The normal loop" in docs/architecture.md
-for the rules this module encodes.
+See docs/architecture.md for the rules this module encodes: "The lifecycle
+protocol" and "The normal loop" state the protocol, and "Recovery",
+"Restart reconciliation" and "Shutdown" state what the daemon does around
+it.
 """
 
 import asyncio
@@ -534,8 +536,8 @@ class Supervisor:
             _log.exception("the handoff after a %r report failed", report.state.value)
             # Whatever went wrong, the project must not be left in
             # terminating: that phase refuses every later report and every
-            # new initialization, so the daemon would be stuck until
-            # someone deleted state.json. The raise keeps the failure
+            # new initialization, so nothing would move until the daemon
+            # restarted and resumed the finish. The raise keeps the failure
             # retrievable through wait_for_finish.
             async with self._lock:
                 self._commit(
