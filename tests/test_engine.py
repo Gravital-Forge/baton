@@ -21,6 +21,7 @@ from baton.models import (
     ProjectState,
     WorkerRecord,
 )
+from baton.prompts import RECONCILIATION_REQUEST
 from baton.state import StateStore
 from baton.tmux import PaneInfo, TmuxError
 from tests.doubles import FakeLauncher, FakeTmux
@@ -58,6 +59,54 @@ def _persisted_and_live(
         test can assert both agree without loading twice itself.
     """
     return supervisor.snapshot(), StateStore(config.state_dir).load()
+
+
+def _persist_project(
+    config: BatonConfig,
+    store: StateStore,
+    project_dir: Path,
+    *,
+    phase: ProjectPhase,
+    last_report: LifecycleReport | None = None,
+) -> WorkerRecord:
+    """Save a persisted ProjectState with a live worker, for a Supervisor built after.
+
+    A test that needs a persisted state builds it here, before the
+    Supervisor under test is constructed, since Supervisor loads its
+    state at construction rather than on demand.
+
+    Args:
+        config: The config naming the state directory the worker's
+            prompt path sits under.
+        store: The state store to save the state to.
+        project_dir: The project directory the persisted state points
+            to; its resolved form is what is saved.
+        phase: The phase the persisted state is saved in.
+        last_report: The last report the persisted state carries, or
+            None.
+
+    Returns:
+        The WorkerRecord the persisted state carries as its current
+        worker.
+    """
+    worker = WorkerRecord(
+        worker_id="worker-1",
+        prompt_path=config.state_dir / "workers" / "worker-1" / "prompt.md",
+        launched_at=datetime.now(UTC),
+        pane_pid=111,
+    )
+    store.save(
+        ProjectState.fresh().updated(
+            phase=phase,
+            project_path=project_dir.resolve(),
+            session_name="baton-project",
+            pane_target="baton-project:worker.0",
+            worker=worker,
+            model="sonnet",
+            last_report=last_report,
+        )
+    )
+    return worker
 
 
 def test_supervisor_loads_persisted_state_at_construction(
@@ -1430,26 +1479,497 @@ async def test_check_worker_recreates_the_session_if_it_vanished(
 
 
 @pytest.mark.anyio
-async def test_start_runs_the_watchdog_that_polls_the_pane(
+async def test_reconcile_from_a_persisted_running_state_sends_the_request(
     config: BatonConfig,
     store: StateStore,
     make_tmux: type[FakeTmux],
     launcher: FakeLauncher,
     project_dir: Path,
 ) -> None:
-    """Start's watchdog polls the pane; a live pane keeps the tick a no-op."""
+    """Reconcile from a persisted running state sends the request and commits."""
     tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=1)])
+    worker = _persist_project(config, store, project_dir, phase=ProjectPhase.running)
     supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
-    result = await supervisor.initialize(project_dir, "start here")
+
+    await supervisor.reconcile()
+
+    assert tmux.send_keys_calls == [("baton-project:worker.0", RECONCILIATION_REQUEST)]
+    for state in _persisted_and_live(config, supervisor):
+        assert state.phase == ProjectPhase.reconciling
+
+    events = supervisor.recent_events(count=10)
+    assert [event.kind for event in events] == [EventKind.reconcile, EventKind.phase]
+    assert events[0].worker_id == worker.worker_id
+    assert events[0].payload == {"timeout": config.reconciliation_timeout}
+    assert events[1].payload["reason"] == "the daemon restarted with a live worker"
+    assert events[1].payload["from"] == "running"
+    assert events[1].payload["to"] == "reconciling"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("phase", [ProjectPhase.blocked, ProjectPhase.recovering])
+async def test_reconcile_from_blocked_or_recovering_sends_the_request(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
+    phase: ProjectPhase,
+) -> None:
+    """Reconcile from a persisted blocked or recovering state sends the request too."""
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=1)])
+    _persist_project(config, store, project_dir, phase=phase)
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+
+    await supervisor.reconcile()
+
+    assert tmux.send_keys_calls == [("baton-project:worker.0", RECONCILIATION_REQUEST)]
+    assert supervisor.snapshot().phase == ProjectPhase.reconciling
+
+
+@pytest.mark.anyio
+async def test_reconcile_from_a_persisted_reconciling_state_sends_the_request_again(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """Reconcile from a persisted reconciling state sends the request again."""
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=1)])
+    _persist_project(config, store, project_dir, phase=ProjectPhase.reconciling)
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+
+    await supervisor.reconcile()
+
+    assert tmux.send_keys_calls == [("baton-project:worker.0", RECONCILIATION_REQUEST)]
+    assert supervisor.snapshot().phase == ProjectPhase.reconciling
+    events = supervisor.recent_events(count=10)
+    assert [event.kind for event in events] == [EventKind.reconcile]
+
+
+@pytest.mark.anyio
+async def test_reconcile_with_a_dead_pane_sends_nothing_and_check_worker_recovers(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """Reconcile with a dead pane sends nothing; the watchdog's first tick recovers."""
+    _persist_project(config, store, project_dir, phase=ProjectPhase.running)
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+
+    await supervisor.reconcile()
+
+    assert tmux.send_keys_calls == []
+    assert supervisor.recent_events(count=10) == []
+    assert supervisor.snapshot().phase == ProjectPhase.running
+
+    await supervisor.check_worker()
+
+    assert len(launcher.launches) == 1
+    assert supervisor.snapshot().phase == ProjectPhase.recovering
+
+
+@pytest.mark.anyio
+async def test_a_running_report_from_reconciling_commits_running(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """A running report from reconciling commits phase running."""
+    worker = _persist_project(
+        config, store, project_dir, phase=ProjectPhase.reconciling
+    )
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+
+    await supervisor.report_lifecycle(
+        worker.worker_id, LifecycleState.running, message="back"
+    )
+
+    for state in _persisted_and_live(config, supervisor):
+        assert state.phase == ProjectPhase.running
+
+
+@pytest.mark.anyio
+async def test_a_blocked_report_from_reconciling_commits_blocked(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """A blocked report from reconciling commits phase blocked."""
+    worker = _persist_project(
+        config, store, project_dir, phase=ProjectPhase.reconciling
+    )
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+
+    await supervisor.report_lifecycle(
+        worker.worker_id, LifecycleState.blocked, message="stuck"
+    )
+
+    for state in _persisted_and_live(config, supervisor):
+        assert state.phase == ProjectPhase.blocked
+
+
+@pytest.mark.anyio
+async def test_a_success_report_from_reconciling_terminates_and_launches_next(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """A success report from reconciling terminates the worker and launches the next."""
+    worker = _persist_project(
+        config, store, project_dir, phase=ProjectPhase.reconciling
+    )
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+
+    await supervisor.report_lifecycle(
+        worker.worker_id,
+        LifecycleState.success,
+        message="done",
+        next_prompt="do the next thing",
+    )
+
+    assert supervisor.snapshot().phase == ProjectPhase.terminating
+
+    await supervisor.wait_for_finish()
+
+    assert launcher.launches[0]["prompt"] == "do the next thing"
+    assert supervisor.snapshot().phase == ProjectPhase.running
+
+
+@pytest.mark.anyio
+async def test_check_worker_past_the_reconciliation_deadline_terminates_and_recovers(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """check_worker past the reconciliation deadline terminates and recovers."""
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=1)])
+    _persist_project(config, store, project_dir, phase=ProjectPhase.running)
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+    await supervisor.reconcile()
+
+    await supervisor.check_worker()
+
+    assert supervisor.snapshot().phase == ProjectPhase.terminating
+    phase_event = supervisor.recent_events(count=10)[-1]
+    assert phase_event.payload["reason"] == (
+        "the worker did not answer the reconciliation request within 0 seconds"
+    )
+
+    await supervisor.wait_for_finish()
+
+    assert signal.SIGTERM in [signum for _, signum in tmux.signals]
+    assert any(
+        event.kind == EventKind.terminate
+        for event in supervisor.recent_events(count=10)
+    )
+    assert len(launcher.launches) == 1
+    assert (
+        "the worker did not answer the reconciliation request within 0 seconds"
+        in launcher.launches[0]["prompt"]
+    )
+    assert supervisor.snapshot().phase == ProjectPhase.recovering
+
+
+@pytest.mark.anyio
+async def test_the_reconciliation_timeout_path_clears_last_report(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """The reconciliation timeout clears a last_report left over from a handoff."""
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=1)])
+    leftover = LifecycleReport(
+        state=LifecycleState.success, message="done", next_prompt="do the next thing"
+    )
+    _persist_project(
+        config, store, project_dir, phase=ProjectPhase.running, last_report=leftover
+    )
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+    await supervisor.reconcile()
+
+    await supervisor.check_worker()
+
+    for state in _persisted_and_live(config, supervisor):
+        assert state.last_report is None
+
+    await supervisor.wait_for_finish()
+
+
+@pytest.mark.anyio
+async def test_check_worker_with_a_generous_reconciliation_timeout_changes_nothing(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """check_worker with a generous reconciliation timeout changes nothing."""
+    config = replace(config, reconciliation_timeout=3600)
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=1)])
+    _persist_project(config, store, project_dir, phase=ProjectPhase.running)
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+    await supervisor.reconcile()
+
+    await supervisor.check_worker()
+
+    assert supervisor.snapshot().phase == ProjectPhase.reconciling
+    assert launcher.launches == []
+    assert tmux.signals == []
+
+
+@pytest.mark.anyio
+async def test_a_milestone_during_reconciling_never_answers_the_request(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """A milestone during reconciling never answers the reconciliation request."""
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=1)])
+    worker = _persist_project(config, store, project_dir, phase=ProjectPhase.running)
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+    await supervisor.reconcile()
+
+    await supervisor.record_status(worker.worker_id, "still going")
+
+    assert supervisor.snapshot().phase == ProjectPhase.reconciling
+    events = supervisor.recent_events(count=10)
+    assert events[-1].kind == EventKind.milestone
+
+    await supervisor.check_worker()
+
+    assert supervisor.snapshot().phase == ProjectPhase.terminating
+
+    await supervisor.wait_for_finish()
+
+
+@pytest.mark.anyio
+async def test_check_worker_on_a_reconciling_state_with_no_deadline_changes_nothing(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """check_worker on a reconciling state with no deadline set changes nothing."""
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=1)])
+    _persist_project(config, store, project_dir, phase=ProjectPhase.reconciling)
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+
+    await supervisor.check_worker()
+
+    assert supervisor.snapshot().phase == ProjectPhase.reconciling
+    assert launcher.launches == []
+    assert tmux.signals == []
+
+
+@pytest.mark.anyio
+async def test_reconcile_in_terminating_with_a_terminal_last_report_resumes_the_finish(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """Reconcile in terminating with a terminal last report resumes the finish."""
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=1)])
+    last_report = LifecycleReport(
+        state=LifecycleState.success, message="done", next_prompt="do the next thing"
+    )
+    _persist_project(
+        config,
+        store,
+        project_dir,
+        phase=ProjectPhase.terminating,
+        last_report=last_report,
+    )
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+
+    await supervisor.reconcile()
+    await supervisor.wait_for_finish()
+
+    assert len(launcher.launches) == 1
+    assert launcher.launches[0]["prompt"] == "do the next thing"
+    assert supervisor.snapshot().phase == ProjectPhase.running
+    assert tmux.send_keys_calls == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "last_report",
+    [LifecycleReport(state=LifecycleState.running, message="working"), None],
+)
+async def test_reconcile_in_terminating_without_a_terminal_last_report_recovers(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
+    last_report: LifecycleReport | None,
+) -> None:
+    """Reconcile in terminating with no terminal last report terminates and recovers."""
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=1)])
+    _persist_project(
+        config,
+        store,
+        project_dir,
+        phase=ProjectPhase.terminating,
+        last_report=last_report,
+    )
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+
+    await supervisor.reconcile()
+    await supervisor.wait_for_finish()
+
+    assert len(launcher.launches) == 1
+    assert (
+        "the daemon restarted while terminating the worker"
+        in launcher.launches[0]["prompt"]
+    )
+    assert supervisor.snapshot().phase == ProjectPhase.recovering
+    assert supervisor.snapshot().recovery_attempts == 1
+    assert any(
+        event.kind == EventKind.terminate
+        for event in supervisor.recent_events(count=10)
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("phase", [ProjectPhase.completed, ProjectPhase.failed])
+async def test_reconcile_in_a_terminal_phase_sends_nothing(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_dir: Path,
+    phase: ProjectPhase,
+) -> None:
+    """Reconcile in completed or failed, with no worker on record, sends nothing."""
+    store.save(
+        ProjectState.fresh().updated(
+            phase=phase, project_path=project_dir.resolve(), worker=None
+        )
+    )
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+
+    await supervisor.reconcile()
+
+    assert tmux.send_keys_calls == []
+    assert tmux.pane_info_calls == []
+    assert supervisor.snapshot().phase == phase
+
+
+@pytest.mark.anyio
+async def test_reconcile_on_a_fresh_uninitialized_supervisor_sends_nothing(
+    supervisor: Supervisor, tmux: FakeTmux
+) -> None:
+    """Reconcile on a fresh, uninitialized supervisor sends nothing."""
+    await supervisor.reconcile()
+
+    assert tmux.send_keys_calls == []
+    assert tmux.pane_info_calls == []
+    assert supervisor.snapshot().phase == ProjectPhase.uninitialized
+
+
+@pytest.mark.anyio
+async def test_a_tmux_error_from_send_keys_propagates_out_of_reconcile(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """A TmuxError from send_keys propagates out of reconcile, phase unmoved."""
+    tmux = make_tmux(
+        pane_infos=[PaneInfo(dead=False, pid=1)],
+        send_error=TmuxError("pane is gone"),
+    )
+    _persist_project(config, store, project_dir, phase=ProjectPhase.running)
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+
+    with pytest.raises(TmuxError):
+        await supervisor.reconcile()
+
+    assert supervisor.snapshot().phase == ProjectPhase.running
+
+
+@pytest.mark.anyio
+async def test_finish_abnormal_that_fails_to_launch_ends_in_failed(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    make_launcher: Callable[..., FakeLauncher],
+    project_dir: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A recovery launch inside the abnormal finish that fails ends in failed."""
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=1)])
+    launcher = make_launcher(launch_errors=[TmuxError("session gone")])
+    _persist_project(config, store, project_dir, phase=ProjectPhase.terminating)
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+
+    await supervisor.reconcile()
+
+    with (
+        caplog.at_level(logging.ERROR, logger="baton.engine"),
+        pytest.raises(TmuxError),
+    ):
+        await supervisor.wait_for_finish()
+
+    assert supervisor.snapshot().phase == ProjectPhase.failed
+    assert supervisor.snapshot().worker is None
+    phase_event = supervisor.recent_events(count=20)[-1]
+    assert phase_event.payload["reason"] == (
+        "the abnormal finish after the daemon restarted while terminating "
+        "the worker failed: session gone"
+    )
+    records = [record for record in caplog.records if record.name == "baton.engine"]
+    assert len(records) == 1
+    assert records[0].getMessage() == (
+        "the abnormal finish after the daemon restarted while terminating "
+        "the worker failed"
+    )
+    assert records[0].exc_info is not None
+
+
+@pytest.mark.anyio
+async def test_start_reconciles_then_runs_the_watchdog(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """Start reconciles a live worker, then the watchdog's own tick polls the pane."""
+    config = replace(config, reconciliation_timeout=3600)
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=1)])
+    _persist_project(config, store, project_dir, phase=ProjectPhase.running)
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
 
     await supervisor.start()
     for _ in range(3):
         await asyncio.sleep(0)
     await supervisor.shutdown()
 
-    assert len(tmux.pane_info_calls) >= 1
-    assert tmux.pane_info_calls[0] == result.pane_target
-    assert supervisor.snapshot().phase == ProjectPhase.running
+    assert tmux.send_keys_calls == [("baton-project:worker.0", RECONCILIATION_REQUEST)]
+    assert tmux.pane_info_calls[0] == "baton-project:worker.0"
+    assert len(tmux.pane_info_calls) >= 2
+    assert supervisor.snapshot().phase == ProjectPhase.reconciling
 
 
 @pytest.mark.anyio
@@ -1466,14 +1986,17 @@ async def test_the_watchdog_survives_a_tick_that_raises(
     check_worker swallows a failed recovery, but the pane read before it
     does not: a tmux binary that has gone missing raises OSError there. If
     that escaped, the loop would end for the daemon's whole life and
-    shutdown would re-raise instead of draining.
+    shutdown would re-raise instead of draining. start runs before
+    initialize here, so reconcile finds no worker yet and never touches
+    the raising pane read itself; only the watchdog's later ticks do,
+    once initialize gives the project a worker to poll.
     """
     tmux = make_tmux(pane_info_error=OSError("tmux is gone"))
     supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
-    await supervisor.initialize(project_dir, "start here")
 
     with caplog.at_level(logging.ERROR, logger="baton.engine"):
         await supervisor.start()
+        await supervisor.initialize(project_dir, "start here")
         for _ in range(6):
             await asyncio.sleep(0)
         await supervisor.shutdown()

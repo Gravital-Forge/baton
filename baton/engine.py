@@ -21,7 +21,7 @@ from baton.models import (
     ProjectState,
     WorkerRecord,
 )
-from baton.prompts import diagnosis_prompt
+from baton.prompts import RECONCILIATION_REQUEST, diagnosis_prompt
 from baton.state import StateStore
 from baton.tmux import TmuxAdapter
 from baton.worker import WorkerLauncher, write_mcp_config
@@ -81,6 +81,7 @@ class Supervisor:
         self._lock = asyncio.Lock()
         self._finish_task: asyncio.Task[None] | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
+        self._reconciliation_deadline: float | None = None
 
     async def initialize(
         self,
@@ -200,7 +201,9 @@ class Supervisor:
     ) -> None:
         """Record a worker's lifecycle report and route on it.
 
-        See "The lifecycle protocol" in docs/architecture.md.
+        See "The lifecycle protocol" in docs/architecture.md. Any report
+        from the current worker answers an outstanding reconciliation
+        request, so it clears the reconciliation deadline.
 
         Args:
             worker_id: The id of the worker making the report.
@@ -225,6 +228,7 @@ class Supervisor:
 
         async with self._lock:
             self._require_current_worker(worker_id)
+            self._reconciliation_deadline = None
             if self._state.phase == ProjectPhase.terminating:
                 raise SupervisorError(
                     f"worker {worker_id!r} is terminating and baton accepts "
@@ -263,7 +267,10 @@ class Supervisor:
                         self._finish(report, worker)
                     )
                 case LifecycleState.running:
-                    if self._state.phase == ProjectPhase.blocked:
+                    if self._state.phase in (
+                        ProjectPhase.blocked,
+                        ProjectPhase.reconciling,
+                    ):
                         self._commit(
                             self._state.updated(
                                 phase=ProjectPhase.running, last_report=report
@@ -317,18 +324,20 @@ class Supervisor:
         to failed rather than raised — the loop must keep running for the
         next tick. Contrast _finish, whose failure is re-raised, because
         wait_for_finish exists to surface it to whoever awaits it.
+
+        A live pane is also checked against the reconciliation deadline,
+        for a project waiting in phase reconciling.
         """
         async with self._lock:
-            if (
-                self._state.worker is None
-                or self._state.phase == ProjectPhase.terminating
-            ):
+            worker = self._state.worker
+            if worker is None or self._state.phase == ProjectPhase.terminating:
                 return
             if not self._tmux.pane_info(target=self._state.pane_target).dead:
+                self._check_reconciliation_deadline(worker)
                 return
             self._store.append_event(
                 EventKind.vanish,
-                self._state.worker.worker_id,
+                worker.worker_id,
                 {
                     "pane_target": self._state.pane_target,
                     "phase": self._state.phase.value,
@@ -344,8 +353,46 @@ class Supervisor:
                     reason=f"recovery after {reason} failed: {exc}",
                 )
 
+    async def reconcile(self) -> None:
+        """Reconcile with a worker left over from before the daemon started.
+
+        This is the daemon's one-time startup work, run once by start
+        before the watchdog begins. It works under the lock and acts by
+        phase. A project in running, blocked, recovering, or reconciling
+        has a worker whose current lifecycle state baton no longer knows,
+        so its pane is asked to report it. A project in terminating has a
+        finish that never ran to completion, so that finish is resumed. A
+        project in uninitialized, completed, or failed has no worker to
+        reconcile with and is left alone.
+
+        Raises:
+            TmuxError: If sending the reconciliation request to the pane
+                fails. The daemon does not start in that case, which is
+                deliberate: a broken pane needs a human, not a watchdog
+                looping over it.
+        """
+        async with self._lock:
+            worker = self._state.worker
+            if worker is None:
+                return
+            if self._state.phase in (
+                ProjectPhase.running,
+                ProjectPhase.blocked,
+                ProjectPhase.recovering,
+                ProjectPhase.reconciling,
+            ):
+                self._request_reconciliation(worker)
+            elif self._state.phase == ProjectPhase.terminating:
+                self._resume_finish(worker)
+
     async def start(self) -> None:
-        """Start the background watchdog that recovers a vanished worker."""
+        """Reconcile with any live worker, then start the background watchdog.
+
+        Raises:
+            TmuxError: If reconcile's reconciliation request fails to
+                send. The daemon does not start in that case.
+        """
+        await self.reconcile()
         self._watchdog_task = asyncio.create_task(self._watch())
 
     async def _watch(self) -> None:
@@ -495,6 +542,40 @@ class Supervisor:
                 )
             raise
 
+    async def _finish_abnormal(self, worker: WorkerRecord, reason: str) -> None:
+        """Terminate a worker baton gave up on, then recover, with no grace period.
+
+        The counterpart to _finish for a worker with no report to route
+        on: one left over from a restart that stayed silent, or one whose
+        reconciliation request timed out. There is no report to wait a
+        grace period for, and nothing to route — only the worker to
+        terminate and recovery to start.
+
+        Args:
+            worker: The worker record to terminate, captured when this
+                finish was scheduled rather than re-read from the state.
+            reason: Why the worker was given up on. Passed to _recover on
+                success, and folded into the phase event's reason on
+                failure.
+
+        Raises:
+            Exception: Whatever _terminate or _recover raised, after the
+                project is committed to failed. The raise keeps the
+                failure retrievable through wait_for_finish.
+        """
+        try:
+            await self._terminate(worker)
+            async with self._lock:
+                self._recover(reason)
+        except Exception as exc:
+            _log.exception("the abnormal finish after %s failed", reason)
+            async with self._lock:
+                self._commit(
+                    self._state.updated(phase=ProjectPhase.failed, worker=None),
+                    reason=f"the abnormal finish after {reason} failed: {exc}",
+                )
+            raise
+
     def _route(self, report: LifecycleReport) -> None:
         """Move the project on from a terminated worker's report.
 
@@ -565,6 +646,97 @@ class Supervisor:
             ),
             reason=reason,
         )
+
+    def _request_reconciliation(self, worker: WorkerRecord) -> None:
+        """Ask a live worker to report its current lifecycle state.
+
+        Called with the lock held, for a worker whose pane may still be
+        live from before the daemon started. A dead pane is left
+        untouched: the watchdog's first tick finds it, records the
+        vanish, and recovers, the same as any other vanish. The reason
+        given to the phase commit below never reaches the event log when
+        the phase is already reconciling, since _commit logs a phase
+        event only on a real change; the reconcile event appended here is
+        what records the request in that case.
+
+        Args:
+            worker: The current worker, to log the reconcile event
+                against.
+
+        Raises:
+            TmuxError: If reading the pane's state or sending the request
+                fails.
+        """
+        if self._tmux.pane_info(target=self._state.pane_target).dead:
+            return
+        self._tmux.send_keys(
+            target=self._state.pane_target, text=RECONCILIATION_REQUEST
+        )
+        self._store.append_event(
+            EventKind.reconcile,
+            worker.worker_id,
+            {"timeout": self._config.reconciliation_timeout},
+        )
+        self._reconciliation_deadline = (
+            time.monotonic() + self._config.reconciliation_timeout
+        )
+        self._commit(
+            self._state.updated(phase=ProjectPhase.reconciling),
+            reason="the daemon restarted with a live worker",
+        )
+
+    def _resume_finish(self, worker: WorkerRecord) -> None:
+        """Resume a finish that the daemon was in the middle of before restarting.
+
+        Called with the lock held, for a project found in terminating at
+        startup. A terminal last report means the worker did report
+        before the daemon stopped, so its finish resumes exactly as it
+        would have; anything else means the worker's outcome is unknown,
+        so the finish that runs is the abnormal one.
+
+        Args:
+            worker: The worker the resumed finish terminates.
+        """
+        last_report = self._state.last_report
+        if last_report is not None and last_report.is_terminal:
+            self._finish_task = asyncio.create_task(self._finish(last_report, worker))
+            return
+        reason = "the daemon restarted while terminating the worker"
+        self._finish_task = asyncio.create_task(self._finish_abnormal(worker, reason))
+
+    def _check_reconciliation_deadline(self, worker: WorkerRecord) -> None:
+        """Give up on a live worker that never answered its reconciliation request.
+
+        Called with the lock held, for a pane check_worker found alive
+        while the project is in phase reconciling. An unset deadline — a
+        state loaded from disk in phase reconciling without reconcile
+        having run, as after a daemon that restarted twice — counts as
+        not passed, since there is no deadline to have passed.
+
+        Clearing last_report on the commit below is deliberate: a
+        success report left over from the previous worker's handoff
+        would otherwise be resumed as a finish at the next startup,
+        relaunching the task with no diagnosis worker.
+
+        Args:
+            worker: The current worker, handed to the abnormal finish
+                scheduled once the deadline has passed.
+        """
+        deadline = self._reconciliation_deadline
+        if self._state.phase != ProjectPhase.reconciling or deadline is None:
+            return
+        if time.monotonic() >= deadline:
+            reason = (
+                "the worker did not answer the reconciliation request within "
+                f"{self._config.reconciliation_timeout} seconds"
+            )
+            self._commit(
+                self._state.updated(phase=ProjectPhase.terminating, last_report=None),
+                reason=reason,
+            )
+            self._finish_task = asyncio.create_task(
+                self._finish_abnormal(worker, reason)
+            )
 
     async def _terminate(self, worker: WorkerRecord) -> None:
         """Terminate a worker's pane process and log the outcome.
