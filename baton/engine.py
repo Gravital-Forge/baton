@@ -97,6 +97,8 @@ class Supervisor:
                 if initial_prompt, a given session_name, or a given model
                 is blank; or if model is None and no default is
                 configured.
+            TmuxError: If checking whether the session exists, creating
+                it, or launching the worker fails.
         """
         async with self._lock:
             if self._state.phase in (
@@ -124,7 +126,7 @@ class Supervisor:
                 )
             if model is not None and model.strip() == "":
                 raise SupervisorError(f"model must not be blank, got {model!r}")
-            chosen_model = model if model is not None else self._config.model
+            chosen_model = model.strip() if model is not None else self._config.model
             if chosen_model is None:
                 raise SupervisorError(
                     "no model chosen: pass model to initialize_project or set "

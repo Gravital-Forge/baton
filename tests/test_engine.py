@@ -311,6 +311,21 @@ async def test_initialize_with_explicit_model_reaches_the_state_and_the_launcher
 
 
 @pytest.mark.anyio
+async def test_initialize_with_a_padded_model_argument_stores_it_stripped(
+    config: BatonConfig,
+    launcher: FakeLauncher,
+    supervisor: Supervisor,
+    project_dir: Path,
+) -> None:
+    """A padded model argument is stored, and reaches the launcher, stripped."""
+    result = await supervisor.initialize(project_dir, "start here", model="  opus  ")
+
+    assert result.model == "opus"
+    assert StateStore(config.state_dir).load().model == "opus"
+    assert launcher.launches[0]["model"] == "opus"
+
+
+@pytest.mark.anyio
 async def test_initialize_with_no_model_argument_uses_the_configurations_model(
     config: BatonConfig,
     launcher: FakeLauncher,
