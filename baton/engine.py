@@ -218,8 +218,7 @@ class Supervisor:
         Raises:
             SupervisorError: If the report's payload breaks its state's
                 rule, if worker_id is not the current worker's id, or if
-                the project is already terminating on an earlier terminal
-                report.
+                the project is already terminating.
         """
         try:
             report = LifecycleReport(
@@ -713,10 +712,8 @@ class Supervisor:
         """Give up on a live worker that never answered its reconciliation request.
 
         Called with the lock held, for a pane check_worker found alive
-        while the project is in phase reconciling. An unset deadline — a
-        state loaded from disk in phase reconciling without reconcile
-        having run, as after a daemon that restarted twice — counts as
-        not passed, since there is no deadline to have passed.
+        while the project is in phase reconciling. An unset deadline counts
+        as not passed, since there is no deadline to have passed.
 
         Clearing last_report on the commit below is deliberate: a
         success report left over from the previous worker's handoff

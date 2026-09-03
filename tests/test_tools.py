@@ -301,8 +301,8 @@ async def test_report_lifecycle_surfaces_a_supervisor_error_as_a_tool_error(
     stub = make_stub_supervisor(
         state=ProjectState.fresh(),
         report_lifecycle_error=SupervisorError(
-            "worker 'worker-1' already reported 'success'; the first "
-            "terminal report is final"
+            "worker 'worker-1' is terminating and baton accepts no further "
+            "report from it"
         ),
     )
     tools = BatonTools(stub)
@@ -316,8 +316,7 @@ async def test_report_lifecycle_surfaces_a_supervisor_error_as_a_tool_error(
         )
 
     assert str(excinfo.value) == (
-        "worker 'worker-1' already reported 'success'; the first "
-        "terminal report is final"
+        "worker 'worker-1' is terminating and baton accepts no further report from it"
     )
 
 

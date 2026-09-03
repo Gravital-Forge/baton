@@ -64,7 +64,9 @@ def _resolve_binary(environ: Mapping[str, str], key: str, name: str) -> Path:
 
     Args:
         environ: The environment to read from.
-        key: The environment variable that may hold an explicit path.
+        key: The environment variable that may hold an explicit path. A
+            value starting with ``~`` is expanded to the user's home
+            before the lookup.
         name: The executable name to search PATH for when the variable is
             absent or empty.
 

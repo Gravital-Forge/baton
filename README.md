@@ -44,10 +44,10 @@ default except `BATON_MODEL`.
 - `BATON_HOST` — the address the MCP server binds to. Default `127.0.0.1`.
 - `BATON_PORT` — the port it listens on. Default `8910`.
 - `BATON_STATE_DIR` — the directory holding baton's state. Default `~/.local/state/baton`.
-- `BATON_CLAUDE_BIN` — the absolute path to the `claude` binary. Defaults to the first `claude`
-  found on `PATH`.
-- `BATON_TMUX_BIN` — the absolute path to the `tmux` binary. Defaults to the first `tmux` found on
-  `PATH`.
+- `BATON_CLAUDE_BIN` — the absolute path to the `claude` binary. A value starting with `~` is
+  expanded to the user's home directory first. Defaults to the first `claude` found on `PATH`.
+- `BATON_TMUX_BIN` — the absolute path to the `tmux` binary. A value starting with `~` is expanded
+  to the user's home directory first. Defaults to the first `tmux` found on `PATH`.
 - `BATON_GRACE_PERIOD` — seconds baton waits after a terminal report before it terminates the
   worker. Default `20`.
 - `BATON_TERMINATION_TIMEOUT` — seconds baton waits after `SIGTERM` before it sends `SIGKILL`.
@@ -102,6 +102,10 @@ A restarted daemon carries the project forward on its own:
 One restart needs you. When baton cannot type into a live worker's pane, it stops with the tmux
 error instead of serving. Kill that pane, or its whole tmux session, and start the daemon again:
 baton reads the dead pane as a worker that vanished and recovers it.
+
+An upgrade can need you too: a daemon that fails to start with a `KeyError` is reading a
+`state.json` that an earlier version of baton wrote. Delete `state.json` from the state directory,
+start the daemon again, and call `initialize_project` to pick the project back up.
 
 ## Continue a stopped project
 

@@ -1651,6 +1651,69 @@ async def test_a_success_report_from_reconciling_terminates_and_launches_next(
 
 
 @pytest.mark.anyio
+async def test_a_completed_report_from_reconciling_terminates_and_stops(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """A completed report from reconciling terminates the worker and stops."""
+    worker = _persist_project(
+        config, store, project_dir, phase=ProjectPhase.reconciling
+    )
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+
+    await supervisor.report_lifecycle(
+        worker.worker_id, LifecycleState.completed, message="all done"
+    )
+
+    assert supervisor.snapshot().phase == ProjectPhase.terminating
+
+    await supervisor.wait_for_finish()
+
+    for state in _persisted_and_live(config, supervisor):
+        assert state.phase == ProjectPhase.completed
+        assert state.worker is None
+    assert launcher.launches == []
+
+
+@pytest.mark.anyio
+async def test_a_failed_report_from_reconciling_terminates_and_recovers(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """A failed report from reconciling terminates the worker and recovers."""
+    worker = _persist_project(
+        config, store, project_dir, phase=ProjectPhase.reconciling
+    )
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+
+    await supervisor.report_lifecycle(
+        worker.worker_id, LifecycleState.failed, message="it broke"
+    )
+
+    assert supervisor.snapshot().phase == ProjectPhase.terminating
+
+    await supervisor.wait_for_finish()
+
+    assert len(launcher.launches) == 1
+    diagnosis_prompt = launcher.launches[0]["prompt"]
+    assert "the worker reported failed: it broke" in diagnosis_prompt
+    assert str(worker.prompt_path) in diagnosis_prompt
+    assert str(store.events_path) in diagnosis_prompt
+
+    for state in _persisted_and_live(config, supervisor):
+        assert state.phase == ProjectPhase.recovering
+        assert state.recovery_attempts == 1
+        assert state.worker is not None
+        assert state.worker.worker_id == "worker-1"
+
+
+@pytest.mark.anyio
 async def test_check_worker_past_the_reconciliation_deadline_terminates_and_recovers(
     config: BatonConfig,
     store: StateStore,

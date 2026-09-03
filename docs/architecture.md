@@ -51,8 +51,11 @@ refused for the message alone:
 1. Every state except `running` requires a message that is not blank. `running` may carry one.
 2. `success` requires a next prompt that is not blank. Every other state forbids one.
 
-`success`, `completed`, and `failed` are terminal. The first terminal report is final: baton
-refuses every later report from that worker.
+`success`, `completed`, and `failed` are terminal, and a terminal report is final: it moves the
+project to phase `terminating`. Baton refuses every report from the current worker while the
+project stays there. A terminal report is not the only way in: a live worker whose reconciliation
+deadline passes unanswered reaches `terminating` with no report at all (see "Restart
+reconciliation"), and baton refuses its next report just the same.
 
 A worker meets these rules twice. `baton/skill/SKILL.md` is the protocol it follows for the whole
 session, and the launcher installs it in the project at `.claude/skills/baton-worker/SKILL.md`. The

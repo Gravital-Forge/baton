@@ -160,9 +160,9 @@ class BatonTools:
         2. ``success`` requires a next prompt that is not blank. Every other
            state, ``running`` included, forbids one.
 
-        ``success``, ``completed`` and ``failed`` are terminal, and the first
-        terminal report is final: baton refuses every later report and ends
-        your session shortly after.
+        ``success``, ``completed`` and ``failed`` are terminal, and a
+        terminal report is final: baton refuses every report that follows
+        it, and ends your session shortly after.
 
         Args:
             worker_id: Your own worker id, from the ``BATON_WORKER_ID``
@@ -182,7 +182,7 @@ class BatonTools:
         Raises:
             ToolError: If the state is not one of the five, if the payload
                 breaks a rule, if worker_id is not the current worker's id, or
-                if a terminal report was already made.
+                if the project is already terminating.
         """
         try:
             lifecycle_state = LifecycleState(state)
