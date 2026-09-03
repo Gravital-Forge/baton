@@ -1568,6 +1568,11 @@ async def test_reconcile_with_a_dead_pane_sends_nothing_and_check_worker_recover
 
     await supervisor.check_worker()
 
+    assert [event.kind for event in supervisor.recent_events(count=10)] == [
+        EventKind.vanish,
+        EventKind.launch,
+        EventKind.phase,
+    ]
     assert len(launcher.launches) == 1
     assert supervisor.snapshot().phase == ProjectPhase.recovering
 
@@ -1875,6 +1880,26 @@ async def test_reconcile_in_a_terminal_phase_sends_nothing(
 
 
 @pytest.mark.anyio
+async def test_reconcile_in_failed_with_a_worker_on_record_sends_nothing(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """Reconcile in failed sends nothing: the phase decides, not a missing worker."""
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=1)])
+    _persist_project(config, store, project_dir, phase=ProjectPhase.failed)
+    supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
+
+    await supervisor.reconcile()
+
+    assert tmux.send_keys_calls == []
+    assert tmux.pane_info_calls == []
+    assert supervisor.snapshot().phase == ProjectPhase.failed
+
+
+@pytest.mark.anyio
 async def test_reconcile_on_a_fresh_uninitialized_supervisor_sends_nothing(
     supervisor: Supervisor, tmux: FakeTmux
 ) -> None:
@@ -2058,20 +2083,7 @@ async def test_initialize_is_refused_while_the_phase_is_reconciling(
 ) -> None:
     """Initialize is refused while the phase is reconciling, with the pinned message."""
     resolved = project_dir.resolve()
-    store.save(
-        ProjectState.fresh().updated(
-            phase=ProjectPhase.reconciling,
-            project_path=resolved,
-            session_name="baton-project",
-            pane_target="baton-project:worker.0",
-            worker=WorkerRecord(
-                worker_id="worker-1",
-                prompt_path=config.state_dir / "workers" / "worker-1" / "prompt.md",
-                launched_at=datetime.now(UTC),
-                pane_pid=111,
-            ),
-        )
-    )
+    _persist_project(config, store, project_dir, phase=ProjectPhase.reconciling)
     supervisor = Supervisor(config=config, store=store, tmux=tmux, launcher=launcher)
 
     expected = f"cannot initialize while the project at {resolved} is 'reconciling'"

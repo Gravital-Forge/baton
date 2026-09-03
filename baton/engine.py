@@ -664,8 +664,8 @@ class Supervisor:
                 against.
 
         Raises:
-            TmuxError: If reading the pane's state or sending the request
-                fails.
+            TmuxError: If sending the request to the pane fails. Reading
+                the pane cannot raise it: a failed read is a dead pane.
         """
         if self._tmux.pane_info(target=self._state.pane_target).dead:
             return

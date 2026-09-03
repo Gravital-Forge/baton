@@ -74,21 +74,28 @@ def build_app(
             its DNS-rebinding protection to.
 
     Returns:
-        A `Starlette` app whose lifespan starts the supervisor's pane
-        watchdog before serving, and stops it and drains pending work
-        after.
+        A `Starlette` app whose lifespan reconciles with any worker left
+        over from a previous run and starts the supervisor's pane
+        watchdog before serving, then stops the watchdog and drains
+        pending work after.
     """
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
-        """Run the supervisor's watchdog for the app's serving life.
+        """Reconcile, then run the supervisor's watchdog for the serving life.
 
         Args:
             app: The Starlette app this lifespan is bound to.
 
         Yields:
-            Control, once the supervisor's watchdog has started, for as
-            long as the app serves requests.
+            Control, once the supervisor has reconciled with any worker
+            left over from a previous run and its watchdog has started,
+            for as long as the app serves requests.
+
+        Raises:
+            TmuxError: If the reconciliation request cannot be sent to a
+                live worker's pane. The app never serves, which is the
+                intent: a pane baton cannot type into needs a human.
         """
         await supervisor.start()
         try:
