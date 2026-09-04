@@ -93,6 +93,8 @@ def _decode_state(raw: Mapping[str, object]) -> ProjectState:
         pane_target=raw["pane_target"],
         worker=_decode_worker(raw["worker"]),
         last_report=_decode_report(raw["last_report"]),
+        model=raw["model"],
+        recovery_attempts=raw["recovery_attempts"],
         updated_at=_decode_time(raw["updated_at"]),
     )
 

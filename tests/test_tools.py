@@ -16,6 +16,7 @@ from baton.models import (
     ProjectState,
     WorkerRecord,
 )
+from baton.tmux import TmuxError
 from baton.tools import RECENT_EVENT_COUNT, BatonTools
 from tests.doubles import StubSupervisor
 
@@ -38,11 +39,11 @@ def _worker(worker_id: str) -> WorkerRecord:
 
 
 @pytest.mark.anyio
-async def test_initialize_project_delegates_path_prompt_and_session_name(
+async def test_initialize_project_delegates_path_prompt_session_name_and_model(
     make_stub_supervisor: type[StubSupervisor],
     tmp_path: Path,
 ) -> None:
-    """initialize_project delegates a built Path, the prompt, and session name."""
+    """initialize_project delegates a built Path, prompt, session name, and model."""
     stub = make_stub_supervisor()
     tools = BatonTools(stub)
 
@@ -50,6 +51,7 @@ async def test_initialize_project_delegates_path_prompt_and_session_name(
         project_path=str(tmp_path),
         initial_prompt="start here",
         session_name="custom-session",
+        model="opus",
     )
 
     assert stub.initialize_calls == [
@@ -57,16 +59,17 @@ async def test_initialize_project_delegates_path_prompt_and_session_name(
             "project_path": tmp_path,
             "initial_prompt": "start here",
             "session_name": "custom-session",
+            "model": "opus",
         }
     ]
 
 
 @pytest.mark.anyio
-async def test_initialize_project_delegates_no_session_name_as_none(
+async def test_initialize_project_delegates_no_session_name_or_model_as_none(
     make_stub_supervisor: type[StubSupervisor],
     tmp_path: Path,
 ) -> None:
-    """initialize_project delegates session_name=None when the caller omits it."""
+    """initialize_project delegates session_name=None and model=None when omitted."""
     stub = make_stub_supervisor()
     tools = BatonTools(stub)
 
@@ -75,6 +78,7 @@ async def test_initialize_project_delegates_no_session_name_as_none(
     )
 
     assert stub.initialize_calls[0]["session_name"] is None
+    assert stub.initialize_calls[0]["model"] is None
 
 
 @pytest.mark.anyio
@@ -84,7 +88,7 @@ async def test_initialize_project_returns_fields_from_the_returned_state(
 ) -> None:
     """initialize_project returns fields from the returned state.
 
-    Returns the phase, session name, pane target, and worker id.
+    Returns the phase, session name, pane target, worker id, and model.
     """
     returned_state = ProjectState.fresh().updated(
         phase=ProjectPhase.running,
@@ -92,6 +96,7 @@ async def test_initialize_project_returns_fields_from_the_returned_state(
         session_name="baton-project",
         pane_target="baton-project:worker.0",
         worker=_worker("worker-1"),
+        model="sonnet",
     )
     stub = make_stub_supervisor(state=returned_state)
     tools = BatonTools(stub)
@@ -105,6 +110,7 @@ async def test_initialize_project_returns_fields_from_the_returned_state(
         "session_name": "baton-project",
         "pane_target": "baton-project:worker.0",
         "worker_id": "worker-1",
+        "model": "sonnet",
     }
 
 
@@ -130,6 +136,32 @@ async def test_initialize_project_surfaces_a_supervisor_error_as_a_tool_error(
     assert (
         str(excinfo.value)
         == f"cannot initialize while the project at {tmp_path} is 'running'"
+    )
+
+
+@pytest.mark.anyio
+async def test_initialize_project_surfaces_a_tmux_error_as_a_tool_error(
+    make_stub_supervisor: type[StubSupervisor],
+    tmp_path: Path,
+) -> None:
+    """initialize_project surfaces a TmuxError as an identical ToolError."""
+    stub = make_stub_supervisor(
+        state=ProjectState.fresh(),
+        initialize_error=TmuxError(
+            "['tmux', 'new-session', '-d', '-s', 'baton-project'] failed: "
+            "duplicate session: baton-project"
+        ),
+    )
+    tools = BatonTools(stub)
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.initialize_project(
+            project_path=str(tmp_path), initial_prompt="start here"
+        )
+
+    assert str(excinfo.value) == (
+        "['tmux', 'new-session', '-d', '-s', 'baton-project'] failed: "
+        "duplicate session: baton-project"
     )
 
 
@@ -269,8 +301,8 @@ async def test_report_lifecycle_surfaces_a_supervisor_error_as_a_tool_error(
     stub = make_stub_supervisor(
         state=ProjectState.fresh(),
         report_lifecycle_error=SupervisorError(
-            "worker 'worker-1' already reported 'success'; the first "
-            "terminal report is final"
+            "worker 'worker-1' is terminating and baton accepts no further "
+            "report from it"
         ),
     )
     tools = BatonTools(stub)
@@ -284,8 +316,7 @@ async def test_report_lifecycle_surfaces_a_supervisor_error_as_a_tool_error(
         )
 
     assert str(excinfo.value) == (
-        "worker 'worker-1' already reported 'success'; the first "
-        "terminal report is final"
+        "worker 'worker-1' is terminating and baton accepts no further report from it"
     )
 
 
@@ -296,7 +327,7 @@ async def test_get_project_status_returns_phase_worker_last_report_and_events(
     """get_project_status returns the full project status.
 
     Asks for RECENT_EVENT_COUNT events, and returns the phase, worker id,
-    serialized last report, and serialized events.
+    model, serialized last report, and serialized events.
     """
     report = LifecycleReport(
         state=LifecycleState.success, message="done", next_prompt="next task"
@@ -312,6 +343,7 @@ async def test_get_project_status_returns_phase_worker_last_report_and_events(
         phase=ProjectPhase.terminating,
         worker=_worker("worker-1"),
         last_report=report,
+        model="sonnet",
     )
     stub = make_stub_supervisor(state=state, events=[event])
     tools = BatonTools(stub)
@@ -322,6 +354,7 @@ async def test_get_project_status_returns_phase_worker_last_report_and_events(
     assert result == {
         "phase": "terminating",
         "worker_id": "worker-1",
+        "model": "sonnet",
         "last_report": {
             "state": "success",
             "message": "done",
@@ -344,8 +377,8 @@ async def test_get_project_status_on_an_uninitialized_project(
 ) -> None:
     """get_project_status handles an uninitialized project.
 
-    Returns None for the worker id and the last report, and an empty
-    event list.
+    Returns None for the worker id, the model, and the last report, and
+    an empty event list.
     """
     stub = make_stub_supervisor()
     tools = BatonTools(stub)
@@ -353,6 +386,7 @@ async def test_get_project_status_on_an_uninitialized_project(
     result = await tools.get_project_status()
 
     assert result["worker_id"] is None
+    assert result["model"] is None
     assert result["last_report"] is None
     assert result["events"] == []
 

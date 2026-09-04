@@ -67,6 +67,9 @@ def test_defaults_come_from_the_documented_values(bin_dir: Path) -> None:
     assert config.grace_period == 20
     assert config.termination_timeout == 5
     assert config.poll_interval == 2
+    assert config.model is None
+    assert config.reconciliation_timeout == 300
+    assert config.recovery_cap == 3
 
 
 def test_every_field_reads_its_environment_variable(
@@ -85,6 +88,9 @@ def test_every_field_reads_its_environment_variable(
         "BATON_GRACE_PERIOD": "30",
         "BATON_TERMINATION_TIMEOUT": "10",
         "BATON_POLL_INTERVAL": "4",
+        "BATON_MODEL": "opus",
+        "BATON_RECONCILIATION_TIMEOUT": "120",
+        "BATON_RECOVERY_CAP": "5",
     }
 
     config = BatonConfig.from_env(environ)
@@ -97,6 +103,9 @@ def test_every_field_reads_its_environment_variable(
     assert config.grace_period == 30
     assert config.termination_timeout == 10
     assert config.poll_interval == 4
+    assert config.model == "opus"
+    assert config.reconciliation_timeout == 120
+    assert config.recovery_cap == 5
 
 
 def test_state_dir_expands_a_tilde(bin_dir: Path) -> None:
@@ -159,6 +168,18 @@ def test_explicit_binary_path_that_exists_is_accepted(off_path_dir: Path) -> Non
     assert config.tmux_bin == off_path_dir / "tmux"
 
 
+def test_binary_override_with_a_tilde_expands(
+    bin_dir: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A tilde in a binary override expands to the user's home directory."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    environ = {"PATH": str(bin_dir), "BATON_CLAUDE_BIN": "~/bin/claude"}
+
+    config = BatonConfig.from_env(environ)
+
+    assert config.claude_bin == bin_dir / "claude"
+
+
 def test_relative_state_dir_becomes_absolute(
     bin_dir: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -212,6 +233,45 @@ def test_a_non_integer_interval_names_its_variable(bin_dir: Path) -> None:
 
     with pytest.raises(ValueError, match="BATON_PORT"):
         BatonConfig.from_env(environ)
+
+
+def test_a_non_integer_reconciliation_timeout_names_its_variable(
+    bin_dir: Path,
+) -> None:
+    """A non-integer reconciliation timeout raises ValueError naming the variable."""
+    environ = {"PATH": str(bin_dir), "BATON_RECONCILIATION_TIMEOUT": "not-a-number"}
+
+    with pytest.raises(ValueError, match="BATON_RECONCILIATION_TIMEOUT"):
+        BatonConfig.from_env(environ)
+
+
+def test_a_non_integer_recovery_cap_names_its_variable(bin_dir: Path) -> None:
+    """A non-integer recovery cap raises ValueError naming the variable."""
+    environ = {"PATH": str(bin_dir), "BATON_RECOVERY_CAP": "not-a-number"}
+
+    with pytest.raises(ValueError, match="BATON_RECOVERY_CAP"):
+        BatonConfig.from_env(environ)
+
+
+@pytest.mark.parametrize("value", [None, "", "   "])
+def test_a_blank_model_reads_as_none(bin_dir: Path, value: str | None) -> None:
+    """An absent, empty, or whitespace-only BATON_MODEL reads as None."""
+    environ = {"PATH": str(bin_dir)}
+    if value is not None:
+        environ["BATON_MODEL"] = value
+
+    config = BatonConfig.from_env(environ)
+
+    assert config.model is None
+
+
+def test_a_model_with_surrounding_whitespace_is_stripped(bin_dir: Path) -> None:
+    """A BATON_MODEL with surrounding whitespace yields the stripped value."""
+    environ = {"PATH": str(bin_dir), "BATON_MODEL": "  sonnet  "}
+
+    config = BatonConfig.from_env(environ)
+
+    assert config.model == "sonnet"
 
 
 def test_from_env_reads_the_process_environment_by_default(

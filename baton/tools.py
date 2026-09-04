@@ -11,6 +11,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from baton.engine import Supervisor, SupervisorError
 from baton.models import LifecycleState, ProjectState
+from baton.tmux import TmuxError
 
 RECENT_EVENT_COUNT = 50
 
@@ -43,16 +44,25 @@ class BatonTools:
         self._supervisor = supervisor
 
     async def initialize_project(
-        self, project_path: str, initial_prompt: str, session_name: str | None = None
+        self,
+        project_path: str,
+        initial_prompt: str,
+        session_name: str | None = None,
+        model: str | None = None,
     ) -> dict[str, object]:
         """Create a project and launch its first worker.
 
         The setup agent calls this, not a worker. Baton creates or reuses the
         tmux session, installs the worker protocol skill in the project, and
         launches the first worker with the initial prompt. One daemon
-        supervises one project, so the call is refused while a project is
-        running, blocked, or terminating. The initial prompt must not be
-        blank, and neither may a session name when you give one.
+        supervises one project, so the call is refused while a project has a
+        current worker. The initial prompt must not be blank, and neither may
+        a session name when you give one.
+
+        Every worker of this project runs on one explicitly chosen model:
+        the ``model`` argument, else the daemon's ``BATON_MODEL``. The call
+        is refused when neither sets one — baton never lets Claude Code's own
+        default decide.
 
         Args:
             project_path: The project directory to supervise. It must already
@@ -60,27 +70,32 @@ class BatonTools:
             initial_prompt: The task the first worker is launched with.
             session_name: The tmux session to use. Defaults to ``baton-``
                 followed by the project directory's name.
+            model: The model every worker of this project runs on. Defaults
+                to the daemon's ``BATON_MODEL``.
 
         Returns:
             The project's phase, the tmux session name, the worker pane's
-            target, and the first worker's id.
+            target, the first worker's id, and the chosen model.
 
         Raises:
-            ToolError: If a project is already active, or if project_path is
-                not an existing directory, or if the initial prompt or a
-                given session name is blank.
+            ToolError: If a project already has a current worker, or if
+                project_path is not an existing directory, or if the initial
+                prompt, a given session name, or a given model is blank, or
+                if model is omitted and BATON_MODEL is not set, or if the
+                tmux command needed to set up the session fails.
         """
         try:
             state = await self._supervisor.initialize(
-                Path(project_path), initial_prompt, session_name
+                Path(project_path), initial_prompt, session_name, model
             )
-        except SupervisorError as exc:
+        except (SupervisorError, TmuxError) as exc:
             raise ToolError(str(exc)) from exc
         return {
             "phase": state.phase.value,
             "session_name": state.session_name,
             "pane_target": state.pane_target,
             "worker_id": _worker_id(state),
+            "model": state.model,
         }
 
     async def report_status(self, worker_id: str, message: str) -> dict[str, object]:
@@ -126,11 +141,15 @@ class BatonTools:
           prompt; baton launches a fresh worker with it.
         - ``completed``: the whole project is done, not just this task.
         - ``failed``: you could not complete the task. Say what went wrong.
+          Baton terminates you and launches a diagnosis worker to
+          investigate.
         - ``blocked``: you need a human's input. You stay alive for that human
           and report again once the work can move.
-        - ``running``: you are still working. It is for reconciliation:
-          baton records it as the last report and moves no phase, except
-          from ``blocked``, which it returns to ``running``.
+        - ``running``: you are still working. It answers baton's
+          reconciliation request after a restart and resumes work from
+          ``blocked``: baton returns the project to ``running`` from
+          ``blocked`` or from ``reconciling``, and moves no phase
+          otherwise.
 
         The payload rules, in the order baton checks them. The message rule is
         checked first, so a report that breaks both is refused for the message
@@ -141,9 +160,9 @@ class BatonTools:
         2. ``success`` requires a next prompt that is not blank. Every other
            state, ``running`` included, forbids one.
 
-        ``success``, ``completed`` and ``failed`` are terminal, and the first
-        terminal report is final: baton refuses every later report and ends
-        your session shortly after.
+        ``success``, ``completed`` and ``failed`` are terminal, and a
+        terminal report is final: baton refuses every report that follows
+        it, and ends your session shortly after.
 
         Args:
             worker_id: Your own worker id, from the ``BATON_WORKER_ID``
@@ -163,7 +182,7 @@ class BatonTools:
         Raises:
             ToolError: If the state is not one of the five, if the payload
                 breaks a rule, if worker_id is not the current worker's id, or
-                if a terminal report was already made.
+                if the project is already terminating.
         """
         try:
             lifecycle_state = LifecycleState(state)
@@ -187,14 +206,15 @@ class BatonTools:
         }
 
     async def get_project_status(self) -> dict[str, object]:
-        """Read back the project's phase, worker, last report, and events.
+        """Read back the project's phase, worker, model, last report, and events.
 
         Returns:
-            The project's phase, the current worker's id or None, the last
-            lifecycle report as its state, message and next prompt (None when
-            nothing has been reported), and the most recent events, oldest
-            first, each carrying its ISO-8601 timestamp, kind, worker id, and
-            payload.
+            The project's phase, the current worker's id or None, the model
+            every worker of this project runs on or None before
+            initialization, the last lifecycle report as its state, message
+            and next prompt (None when nothing has been reported), and the
+            most recent events, oldest first, each carrying its ISO-8601
+            timestamp, kind, worker id, and payload.
         """
         state = self._supervisor.snapshot()
         events = self._supervisor.recent_events(RECENT_EVENT_COUNT)
@@ -202,6 +222,7 @@ class BatonTools:
         return {
             "phase": state.phase.value,
             "worker_id": _worker_id(state),
+            "model": state.model,
             "last_report": None if last_report is None else last_report.to_dict(),
             "events": [event.to_dict() for event in events],
         }

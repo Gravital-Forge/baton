@@ -55,6 +55,9 @@ def config(tmp_path: Path) -> BatonConfig:
         grace_period=0,
         termination_timeout=0,
         poll_interval=0,
+        model="sonnet",
+        reconciliation_timeout=0,
+        recovery_cap=3,
     )
 
 

@@ -28,10 +28,13 @@ The states:
 - **`success`** — the task is done and more work remains. Supply the next prompt;
   `success` without one is not a valid report.
 - **`completed`** — the whole project is done, not just this task.
-- **`failed`** — you could not complete the task. Say what went wrong.
+- **`failed`** — you could not complete the task. Say what went wrong. Baton
+  terminates you and launches a diagnosis worker to investigate.
 - **`blocked`** — you need a human's input to continue. You stay alive for that
   human, and you report `running` once the work can move, which tells baton you
   are working again and returns the project to `running`.
+- **`running`** — you are still working. Report it to answer baton's
+  reconciliation request, or to resume from `blocked`.
 
 Every report except `running` carries a message that says what happened. Baton
 rejects a report without one.
@@ -47,20 +50,34 @@ enough task-specific detail that its next action is unambiguous.
 
 ## Reconciliation
 
-When baton restarts, it asks you for your current state. Answer at once, through
-`report_lifecycle`, and report the state you are truly in. Use `running` when you
-are still working on the task: it tells baton nothing has to change. From
-`blocked`, it returns the project to `running`.
+When baton restarts and finds you still alive, it types a request into your
+session asking for your current state. Answer at once, through
+`report_lifecycle`, with the state you are truly in: `running` when you are
+still working, `blocked` when you are waiting on a human, or the terminal state
+you reached. A milestone through `report_status` is not an answer — only
+`report_lifecycle` clears the request.
+
+Baton waits a bounded time, five minutes by default, for your answer. Silence
+past that time is an abnormal end: baton terminates you and launches a
+diagnosis worker.
+
+## Diagnosis
+
+A diagnosis worker is an ordinary worker, launched to take over when the worker
+before it failed or ended without reporting. Its prompt says what happened and
+points it at the previous worker's prompt, the project, and baton's event log.
+Baton asks it for one of two outcomes: `success` with a next prompt, or
+`blocked`.
 
 ## Baton's tools
 
 Every report you make carries your own worker id, from the `BATON_WORKER_ID`
 environment variable: `report_status` and `report_lifecycle` both take it.
 
-- `initialize_project(project_path, initial_prompt, session_name=None)` — creates a
-  project and launches its first worker. The setup agent calls this, not you.
+- `initialize_project(project_path, initial_prompt, session_name=None, model=None)` —
+  creates a project and launches its first worker. The setup agent calls this, not you.
 - `report_status(worker_id, message)` — records a milestone.
 - `report_lifecycle(worker_id, state, message=None, next_prompt=None)` — reports
   your lifecycle state. The only call baton acts on.
-- `get_project_status()` — reads back the project's phase, current worker, last
-  lifecycle report, and recent events.
+- `get_project_status()` — reads back the project's phase, current worker,
+  model, last lifecycle report, and recent events.

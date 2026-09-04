@@ -27,6 +27,8 @@ class ProjectPhase(StrEnum):
 
     uninitialized = "uninitialized"
     running = "running"
+    recovering = "recovering"
+    reconciling = "reconciling"
     blocked = "blocked"
     terminating = "terminating"
     completed = "completed"
@@ -40,6 +42,8 @@ class EventKind(StrEnum):
     lifecycle = "lifecycle"
     launch = "launch"
     terminate = "terminate"
+    vanish = "vanish"
+    reconcile = "reconcile"
     phase = "phase"
 
 
@@ -174,6 +178,10 @@ class ProjectState:
             active.
         last_report: The most recent lifecycle report, or None before one
             has arrived.
+        model: The model every worker of this project runs on, or None
+            before initialization.
+        recovery_attempts: The number of diagnosis workers launched since
+            the last success report.
         updated_at: When this state was last written. The caller is
             responsible for passing a timezone-aware UTC value.
     """
@@ -184,6 +192,8 @@ class ProjectState:
     pane_target: str | None
     worker: WorkerRecord | None
     last_report: LifecycleReport | None
+    model: str | None
+    recovery_attempts: int
     updated_at: datetime
 
     @classmethod
@@ -192,7 +202,8 @@ class ProjectState:
 
         Returns:
             A ProjectState in phase ``uninitialized``, with every
-            optional field None and updated_at stamped to now.
+            optional field None, recovery_attempts at 0, and updated_at
+            stamped to now.
         """
         return cls(
             phase=ProjectPhase.uninitialized,
@@ -201,6 +212,8 @@ class ProjectState:
             pane_target=None,
             worker=None,
             last_report=None,
+            model=None,
+            recovery_attempts=0,
             updated_at=datetime.now(UTC),
         )
 
@@ -224,8 +237,9 @@ class ProjectState:
         Returns:
             A mapping of the phase as the enum's value string, the
             project path as a string, the session name, the pane target,
-            the worker and last report as their own mappings, and
-            updated_at as an ISO 8601 string. Every None is preserved.
+            the worker and last report as their own mappings, the model,
+            the recovery attempt count, and updated_at as an ISO 8601
+            string. Every None is preserved.
         """
         return {
             "phase": self.phase.value,
@@ -238,6 +252,8 @@ class ProjectState:
             "last_report": (
                 None if self.last_report is None else self.last_report.to_dict()
             ),
+            "model": self.model,
+            "recovery_attempts": self.recovery_attempts,
             "updated_at": self.updated_at.isoformat(),
         }
 

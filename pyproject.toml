@@ -5,7 +5,11 @@ description = "Baton"
 authors = [{name = "Matt Krainski", email = "matt@gravitalforge.com"}]
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = ["mcp[cli]>=2.0.0,<3"]
+dependencies = [
+    "mcp[cli]>=2.0.0,<3",
+    "starlette>=1.6.0,<2.0.0",
+    "uvicorn>=0.52.4,<0.53.0",
+]
 
 [dependency-groups]
 dev = [

@@ -16,6 +16,7 @@ _LAUNCH_SCRIPT_TEMPLATE = (
     "#!/usr/bin/env bash\n"
     "exec {claude} \\\n"
     "  --session-id {worker_id} \\\n"
+    "  --model {model} \\\n"
     "  --mcp-config {mcp_config} \\\n"
     "  --append-system-prompt {preamble} \\\n"
     "  -- \\\n"
@@ -73,13 +74,16 @@ class WorkerLauncher:
         self._config = config
         self._tmux = tmux
 
-    def launch(self, project_path: Path, pane_target: str, prompt: str) -> WorkerRecord:
+    def launch(
+        self, project_path: Path, pane_target: str, prompt: str, model: str
+    ) -> WorkerRecord:
         """Launch a worker into the given pane and return its record.
 
         Args:
             project_path: The directory the worker's pane starts in.
             pane_target: The tmux pane to respawn, e.g. `"<session>:worker"`.
             prompt: The task prompt to give the worker.
+            model: The model name passed to the worker's `--model` flag.
 
         Returns:
             The `WorkerRecord` describing the launched worker.
@@ -98,6 +102,7 @@ class WorkerLauncher:
             _LAUNCH_SCRIPT_TEMPLATE.format(
                 claude=shlex.quote(str(self._config.claude_bin)),
                 worker_id=shlex.quote(worker_id),
+                model=shlex.quote(model),
                 mcp_config=shlex.quote(str(mcp_config_path)),
                 preamble=shlex.quote(WORKER_PREAMBLE),
                 prompt_path=shlex.quote(str(prompt_path)),

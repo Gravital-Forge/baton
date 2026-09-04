@@ -16,13 +16,19 @@ from tests.doubles import FakeTmux
 
 
 def _expected_launch_script(
-    *, claude_bin: Path, worker_id: str, mcp_config_path: Path, prompt_path: Path
+    *,
+    claude_bin: Path,
+    worker_id: str,
+    model: str,
+    mcp_config_path: Path,
+    prompt_path: Path,
 ) -> str:
     """Build the launch.sh text the pinned template should produce.
 
     Args:
         claude_bin: The claude binary path baton would invoke.
         worker_id: The worker id used as the Claude Code session id.
+        model: The model name passed to `--model`.
         mcp_config_path: The shared mcp.json path passed to `--mcp-config`.
         prompt_path: The worker's prompt.md path read into the positional
             argument.
@@ -34,6 +40,7 @@ def _expected_launch_script(
         "#!/usr/bin/env bash\n"
         f"exec {shlex.quote(str(claude_bin))} \\\n"
         f"  --session-id {shlex.quote(worker_id)} \\\n"
+        f"  --model {shlex.quote(model)} \\\n"
         f"  --mcp-config {shlex.quote(str(mcp_config_path))} \\\n"
         f"  --append-system-prompt {shlex.quote(WORKER_PREAMBLE)} \\\n"
         "  -- \\\n"
@@ -48,7 +55,7 @@ def test_launch_writes_the_prompt_text_to_prompt_md(
     tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=111)])
     launcher = WorkerLauncher(config, tmux)
 
-    record = launcher.launch(project_dir, "baton-1:worker", "do the thing")
+    record = launcher.launch(project_dir, "baton-1:worker", "do the thing", "sonnet")
 
     assert record.prompt_path.read_text(encoding="utf-8") == "do the thing"
 
@@ -60,12 +67,13 @@ def test_launch_script_matches_the_pinned_template_line_by_line(
     tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=111)])
     launcher = WorkerLauncher(config, tmux)
 
-    record = launcher.launch(project_dir, "baton-1:worker", "do the thing")
+    record = launcher.launch(project_dir, "baton-1:worker", "do the thing", "sonnet")
 
     worker_dir = config.state_dir / "workers" / record.worker_id
     expected = _expected_launch_script(
         claude_bin=config.claude_bin,
         worker_id=record.worker_id,
+        model="sonnet",
         mcp_config_path=config.state_dir / "mcp.json",
         prompt_path=worker_dir / "prompt.md",
     )
@@ -82,7 +90,7 @@ def test_launch_script_is_written_with_mode_0o755(
     tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=111)])
     launcher = WorkerLauncher(config, tmux)
 
-    record = launcher.launch(project_dir, "baton-1:worker", "do the thing")
+    record = launcher.launch(project_dir, "baton-1:worker", "do the thing", "sonnet")
 
     launch_script = config.state_dir / "workers" / record.worker_id / "launch.sh"
     assert launch_script.stat().st_mode & 0o777 == 0o755
@@ -98,13 +106,28 @@ def test_launch_script_quotes_every_path_containing_a_space(
     tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=111)])
     launcher = WorkerLauncher(config, tmux)
 
-    record = launcher.launch(project_dir, "baton-1:worker", "do the thing")
+    record = launcher.launch(project_dir, "baton-1:worker", "do the thing", "sonnet")
 
     worker_dir = state_dir / "workers" / record.worker_id
     script_text = (worker_dir / "launch.sh").read_text(encoding="utf-8")
     assert shlex.quote(str(claude_bin)) in script_text
     assert shlex.quote(str(state_dir / "mcp.json")) in script_text
     assert shlex.quote(str(worker_dir / "prompt.md")) in script_text
+
+
+def test_launch_script_quotes_a_model_containing_a_space(
+    config: BatonConfig, project_dir: Path, make_tmux: type[FakeTmux]
+) -> None:
+    """A model name with a space is shell-quoted wherever launch.sh names it."""
+    model = "claude opus 4"
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=111)])
+    launcher = WorkerLauncher(config, tmux)
+
+    record = launcher.launch(project_dir, "baton-1:worker", "do the thing", model)
+
+    worker_dir = config.state_dir / "workers" / record.worker_id
+    script_text = (worker_dir / "launch.sh").read_text(encoding="utf-8")
+    assert shlex.quote(model) in script_text
 
 
 def test_launch_script_uses_the_shell_quoted_worker_preamble(
@@ -114,7 +137,7 @@ def test_launch_script_uses_the_shell_quoted_worker_preamble(
     tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=111)])
     launcher = WorkerLauncher(config, tmux)
 
-    record = launcher.launch(project_dir, "baton-1:worker", "do the thing")
+    record = launcher.launch(project_dir, "baton-1:worker", "do the thing", "sonnet")
 
     worker_dir = config.state_dir / "workers" / record.worker_id
     script_text = (worker_dir / "launch.sh").read_text(encoding="utf-8")
@@ -129,7 +152,7 @@ def test_launch_respawns_the_pane_with_env_and_quoted_command(
     tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=111)])
     launcher = WorkerLauncher(config, tmux)
 
-    record = launcher.launch(project_dir, "baton-1:worker", "do the thing")
+    record = launcher.launch(project_dir, "baton-1:worker", "do the thing", "sonnet")
 
     launch_script = config.state_dir / "workers" / record.worker_id / "launch.sh"
     assert tmux.respawn_calls == [
@@ -149,7 +172,7 @@ def test_launch_returns_a_worker_record_with_the_expected_shape(
     tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=4242)])
     launcher = WorkerLauncher(config, tmux)
 
-    record = launcher.launch(project_dir, "baton-1:worker", "do the thing")
+    record = launcher.launch(project_dir, "baton-1:worker", "do the thing", "sonnet")
 
     assert isinstance(record, WorkerRecord)
     assert uuid.UUID(record.worker_id).version == 4
@@ -168,7 +191,7 @@ def test_launch_records_pane_pid_none_when_pane_has_no_pid(
     tmux = make_tmux(pane_infos=[PaneInfo(dead=True, pid=None)])
     launcher = WorkerLauncher(config, tmux)
 
-    record = launcher.launch(project_dir, "baton-1:worker", "do the thing")
+    record = launcher.launch(project_dir, "baton-1:worker", "do the thing", "sonnet")
 
     assert record.pane_pid is None
 
@@ -180,8 +203,8 @@ def test_launch_twice_mints_different_worker_ids_and_directories(
     tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=111)])
     launcher = WorkerLauncher(config, tmux)
 
-    first = launcher.launch(project_dir, "baton-1:worker", "task one")
-    second = launcher.launch(project_dir, "baton-1:worker", "task two")
+    first = launcher.launch(project_dir, "baton-1:worker", "task one", "sonnet")
+    second = launcher.launch(project_dir, "baton-1:worker", "task two", "sonnet")
 
     assert first.worker_id != second.worker_id
     assert first.prompt_path.parent != second.prompt_path.parent
@@ -194,7 +217,7 @@ def test_launch_does_not_write_the_mcp_config(
     tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=111)])
     launcher = WorkerLauncher(config, tmux)
 
-    launcher.launch(project_dir, "baton-1:worker", "do the thing")
+    launcher.launch(project_dir, "baton-1:worker", "do the thing", "sonnet")
 
     assert not (config.state_dir / "mcp.json").exists()
 

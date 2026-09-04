@@ -13,6 +13,8 @@ DEFAULT_STATE_DIR = "~/.local/state/baton"
 DEFAULT_GRACE_PERIOD = 20
 DEFAULT_TERMINATION_TIMEOUT = 5
 DEFAULT_POLL_INTERVAL = 2
+DEFAULT_RECONCILIATION_TIMEOUT = 300
+DEFAULT_RECOVERY_CAP = 3
 
 
 def _read_int(environ: Mapping[str, str], key: str, default: int) -> int:
@@ -39,12 +41,32 @@ def _read_int(environ: Mapping[str, str], key: str, default: int) -> int:
         raise ValueError(f"{key} must be an integer, got {value!r}") from exc
 
 
+def _read_optional_str(environ: Mapping[str, str], key: str) -> str | None:
+    """Read a string value from the environment, treating blank as absent.
+
+    Args:
+        environ: The environment to read from.
+        key: The environment variable name to look up.
+
+    Returns:
+        The value with surrounding whitespace stripped, or ``None`` when the
+        variable is absent, empty, or holds only whitespace.
+    """
+    value = environ.get(key)
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
 def _resolve_binary(environ: Mapping[str, str], key: str, name: str) -> Path:
     """Find the absolute path to an executable, preferring an override.
 
     Args:
         environ: The environment to read from.
-        key: The environment variable that may hold an explicit path.
+        key: The environment variable that may hold an explicit path. A
+            value starting with ``~`` is expanded to the user's home
+            before the lookup.
         name: The executable name to search PATH for when the variable is
             absent or empty.
 
@@ -60,7 +82,8 @@ def _resolve_binary(environ: Mapping[str, str], key: str, name: str) -> Path:
     search_path = environ.get("PATH", "")
     value = environ.get(key)
     if value:
-        found = shutil.which(value, path=search_path)
+        expanded = str(Path(value).expanduser())
+        found = shutil.which(expanded, path=search_path)
         if not found:
             raise ValueError(f"{key}={value!r} does not resolve to an executable")
     else:
@@ -103,6 +126,17 @@ class BatonConfig:
             ``BATON_TERMINATION_TIMEOUT``. Defaults to ``5``.
         poll_interval: Seconds between polls of the worker pane's liveness.
             Read from ``BATON_POLL_INTERVAL``. Defaults to ``2``.
+        model: The daemon's default worker model, used when
+            ``initialize_project`` names none. Read from ``BATON_MODEL``. An
+            absent, empty, or whitespace-only value is ``None``. Defaults to
+            ``None``.
+        reconciliation_timeout: Seconds baton waits for a worker to report
+            its lifecycle after asking it to reconcile. Read from
+            ``BATON_RECONCILIATION_TIMEOUT``. Defaults to ``300``.
+        recovery_cap: The number of diagnosis workers baton launches
+            consecutively for a project — a success report resets the
+            count — before it stops and waits for a human. Read from
+            ``BATON_RECOVERY_CAP``. Defaults to ``3``.
     """
 
     host: str
@@ -113,6 +147,9 @@ class BatonConfig:
     grace_period: int
     termination_timeout: int
     poll_interval: int
+    model: str | None
+    reconciliation_timeout: int
+    recovery_cap: int
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Self:
@@ -148,4 +185,11 @@ class BatonConfig:
             poll_interval=_read_int(
                 environ, "BATON_POLL_INTERVAL", DEFAULT_POLL_INTERVAL
             ),
+            model=_read_optional_str(environ, "BATON_MODEL"),
+            reconciliation_timeout=_read_int(
+                environ,
+                "BATON_RECONCILIATION_TIMEOUT",
+                DEFAULT_RECONCILIATION_TIMEOUT,
+            ),
+            recovery_cap=_read_int(environ, "BATON_RECOVERY_CAP", DEFAULT_RECOVERY_CAP),
         )
