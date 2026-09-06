@@ -13,8 +13,8 @@ from pathlib import Path
 import pytest
 
 from baton.config import BatonConfig
-from baton.state import StateStore
-from tests.doubles import FakeLauncher, FakeTmux, StubSupervisor
+from baton.state import StateStore, project_state_dir
+from tests.doubles import FakeLauncher, FakeTmux, StubCoordinator, StubSupervisor
 
 
 @pytest.fixture
@@ -62,17 +62,29 @@ def config(tmp_path: Path) -> BatonConfig:
 
 
 @pytest.fixture
-def store(config: BatonConfig) -> StateStore:
-    """Build a `StateStore` over the config's state directory.
-
-    Args:
-        config: The config naming the state directory to use.
+def project_id() -> str:
+    """Hand over the project id a single-project test keys its state by.
 
     Returns:
-        A `StateStore` pointed at `config.state_dir`, which does not yet
-        exist on disk.
+        A fixed eight-character id, standing in for one the coordinator
+        would mint.
     """
-    return StateStore(config.state_dir)
+    return "a1b2c3d4"
+
+
+@pytest.fixture
+def store(config: BatonConfig, project_id: str) -> StateStore:
+    """Build a `StateStore` over one project's directory under the state dir.
+
+    Args:
+        config: The config naming the daemon's state directory.
+        project_id: The id naming the project's own directory.
+
+    Returns:
+        A `StateStore` pointed at `<state dir>/projects/<project id>`,
+        which does not yet exist on disk.
+    """
+    return StateStore(project_state_dir(config.state_dir, project_id))
 
 
 @pytest.fixture
@@ -163,3 +175,14 @@ def make_stub_supervisor() -> type[StubSupervisor]:
         errors the test wants scripted.
     """
     return StubSupervisor
+
+
+@pytest.fixture
+def make_stub_coordinator() -> type[StubCoordinator]:
+    """Hand over the `StubCoordinator` class, for a test that scripts its own.
+
+    Returns:
+        The `StubCoordinator` class, called with the supervisor and the
+        errors the test wants scripted.
+    """
+    return StubCoordinator

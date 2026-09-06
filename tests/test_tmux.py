@@ -135,6 +135,25 @@ def test_create_session_raises_tmux_error_on_nonzero_exit() -> None:
         adapter.create_session("baton-1", Path("/work/baton-1"))
 
 
+def test_kill_session_targets_the_session_exactly() -> None:
+    """Killing a session runs `kill-session` against an exact-match target."""
+    runner = FakeRunner([_completed([], 0)])
+    adapter = TmuxAdapter(TMUX_BIN, runner)
+
+    adapter.kill_session("baton-1")
+
+    assert runner.calls == [[TMUX, "kill-session", "-t", "=baton-1"]]
+
+
+def test_kill_session_raises_tmux_error_on_nonzero_exit() -> None:
+    """A non-zero exit from `kill-session` raises TmuxError."""
+    runner = FakeRunner([_completed([], 1, stderr="session not found")])
+    adapter = TmuxAdapter(TMUX_BIN, runner)
+
+    with pytest.raises(TmuxError, match="session not found"):
+        adapter.kill_session("baton-1")
+
+
 def test_respawn_pane_issues_one_call_with_env_and_command_last() -> None:
     """Respawning a pane passes each env var as `-e KEY=VALUE`, command last."""
     runner = FakeRunner([_completed([], 0)])

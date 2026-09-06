@@ -1,9 +1,10 @@
 # Baton
 
-Baton is a supervisor daemon. It runs Claude Code worker sessions inside one tmux session, one
-worker at a time, and passes work from each finished worker to the next. It serves an MCP tool
-surface over SSE (Server-Sent Events); a worker reports to it through those tools, and baton
-decides what happens next. One daemon supervises one project.
+Baton is a supervisor daemon. It runs Claude Code worker sessions in tmux, one worker at a time per
+project, and passes work from each finished worker to the next. It serves an MCP tool surface over
+SSE (Server-Sent Events); a worker reports to it through those tools, and baton decides what happens
+next. One daemon supervises many projects at once, each with its own tmux session, its own worker,
+and its own event log.
 
 See [`docs/architecture.md`](docs/architecture.md) for how baton works.
 
@@ -39,7 +40,7 @@ The daemon runs in the foreground and serves until you stop it.
 ## Configure
 
 Baton reads its configuration from the environment once, at startup. Every variable below has a
-default except `BATON_MODEL`.
+default except `BATON_MODEL`, and one configuration governs every project the daemon holds.
 
 - `BATON_HOST` — the address the MCP server binds to. Default `127.0.0.1`.
 - `BATON_PORT` — the port it listens on. Default `8910`.
@@ -48,19 +49,32 @@ default except `BATON_MODEL`.
   expanded to the user's home directory first. Defaults to the first `claude` found on `PATH`.
 - `BATON_TMUX_BIN` — the absolute path to the `tmux` binary. A value starting with `~` is expanded
   to the user's home directory first. Defaults to the first `tmux` found on `PATH`.
-- `BATON_GRACE_PERIOD` — seconds baton waits after a terminal report before it terminates the
-  worker. Default `20`.
+- `BATON_GRACE_PERIOD` — seconds baton waits before it terminates a worker, after that worker's
+  terminal report or after a `close_project` call. Default `20`.
 - `BATON_TERMINATION_TIMEOUT` — seconds baton waits after `SIGTERM` before it sends `SIGKILL`.
   Default `5`.
-- `BATON_POLL_INTERVAL` — seconds between polls of the worker pane. Default `2`.
-- `BATON_MODEL` — the model every worker runs on. Required unless `initialize_project` is given a
-  `model` argument; baton never lets Claude Code's own default choose it.
+- `BATON_POLL_INTERVAL` — seconds between polls of the worker panes. Default `2`.
+- `BATON_MODEL` — the model a project's workers run on when `initialize_project` names none of its
+  own. One of the two must name a model; baton never lets Claude Code's own default choose it.
 - `BATON_RECONCILIATION_TIMEOUT` — seconds baton waits for a live worker to answer a
   reconciliation request before giving up on it and starting recovery. Default `300`.
-- `BATON_RECOVERY_CAP` — the number of diagnosis workers baton launches in a row before it
-  stops and holds the project in phase `failed`. Default `3`.
+- `BATON_RECOVERY_CAP` — the number of diagnosis workers baton launches in a row before it stops
+  and holds that project in phase `failed`. Default `3`.
 
 Baton refuses to start when it cannot find `claude` or `tmux`.
+
+## The state directory
+
+`BATON_STATE_DIR` names one directory for the whole daemon. Two paths in it are yours: `mcp.json`,
+the MCP client config every project shares, and `projects/<project id>/`, where one project keeps
+its state, its event log, and the record of every worker it ran. "The state directory" in
+[`docs/architecture.md`](docs/architecture.md) says what each file holds.
+
+Baton finds its projects by scanning `projects/`, so nothing has to be registered anywhere else. A
+`state.json` at the root of the state directory belongs to a layout baton no longer writes: the
+daemon refuses to start when it finds one, and names the file. Baton never reads it. Deal with
+whatever worker it describes, move the file out of the state directory, and start that project again
+with `initialize_project` — it comes back as a new project, with an id of its own.
 
 ## Point a project at the daemon
 
@@ -72,25 +86,35 @@ state directory like this:
 claude --mcp-config ~/.local/state/baton/mcp.json
 ```
 
-Then ask that session to call `initialize_project` with the project's directory and the first
-worker's prompt, and a `model` too when `BATON_MODEL` is unset. That session is the setup agent; it
-is not a worker.
+Then ask that session to call `initialize_project` with the project's directory, a title, and the
+first worker's prompt — and a `model` too when `BATON_MODEL` is unset. Baton mints the project an
+eight-character id and hands it back; that id names the project in every later call. That session is
+the setup agent, not a worker, and it can start as many projects as you ask it for.
+
+A title is a display name, and titles need not be unique. It also names the project's tmux session
+(see "Watch the work"), so baton refuses a title whose session name is taken already. An
+initialization that created its tmux session and then failed to launch the worker leaves that
+session running and registers no project. Baton refuses the same title next time and names the
+session: kill it, or pass a `session_name` of your own.
 
 ## Watch the work
 
-Baton names the tmux session `baton-` followed by the project directory's name, unless the caller
-supplies a name. Attach to it like this:
+Each project runs in a tmux session of its own, named `baton-` followed by the title's slug. See
+"Project identity" in [`docs/architecture.md`](docs/architecture.md) for how a title becomes a
+slug. Pass `session_name` to `initialize_project` to choose the name yourself. `list_projects`
+gives you every project's session name, along with its id, its phase, and its current worker.
+
+Attach to a session like this:
 
 ```sh
-tmux attach -t =baton-<project directory name>
+tmux attach -t =baton-<slug>
 ```
 
-The `=` is tmux's exact-match prefix. The worker runs in the pane
-`baton-<project directory name>:worker.0`.
+The `=` is tmux's exact-match prefix. The worker runs in the pane `baton-<slug>:worker.0`.
 
 ## After a restart
 
-A restarted daemon carries the project forward on its own:
+A restarted daemon carries each project forward on its own:
 
 - It reconciles with a worker still alive from before: it types a request into the worker's pane
   asking for its current state, and waits a bounded time — `BATON_RECONCILIATION_TIMEOUT` — for
@@ -99,21 +123,33 @@ A restarted daemon carries the project forward on its own:
 - It recovers a worker that died while the daemon was down, by launching a diagnosis worker in its
   place — up to the recovery cap.
 
-One restart needs you. When baton cannot type into a live worker's pane, it stops with the tmux
-error instead of serving. Kill that pane, or its whole tmux session, and start the daemon again:
-baton reads the dead pane as a worker that vanished and recovers it.
+No project's trouble reaches another. When baton cannot type into a live worker's pane, it gives
+that one project up: the project moves to phase `failed` with the tmux error as the reason, and the
+daemon serves every other project as usual. `get_project_status` shows you the reason. The pane is
+left alive, because what it holds is what you need to read; kill it when you are done with it, or
+call `resume_project`, which respawns it with a fresh worker.
 
-An upgrade can need you too: a daemon that fails to start with a `KeyError` is reading a
-`state.json` that an earlier version of baton wrote. Delete `state.json` from the state directory,
-start the daemon again, and call `initialize_project` to pick the project back up — the launch
-replaces any worker still running in that session, without giving it a chance to report.
+## Continue or retire a project
 
-## Continue a stopped project
+Baton holds a project in phase `completed` when a worker reports the whole project done, and in
+phase `failed` when it cannot carry the work forward on its own. Read `get_project_status` for the
+phase and the recent events; the phase event that moved the project carries baton's reason.
 
-Baton holds a project in phase `failed` when it cannot carry the work forward on its own. Read
-`get_project_status` for the phase and the recent events; the phase event that moved the project to
-`failed` carries baton's reason. Resolve the cause, then call `initialize_project` again — baton
-accepts it from `failed`.
+Call `resume_project` with the project's id and a prompt to carry the project on. It keeps its id,
+its title, its tmux session and its event log, and the new worker runs on the model the project was
+created with. Write that prompt as a whole context: the new worker remembers nothing of the workers
+before it.
+
+Call `close_project` with the project's id to retire it for good. Baton gives any running worker the
+grace period, terminates it, kills the project's tmux session, and frees that session name for a new
+project. A closed project leaves `list_projects` and cannot be resumed; its state directory stays on
+disk, and `get_project_status` still reads it back by id. A project that is finishing with its
+current worker is refused for the seconds that takes — call again. A close that could not terminate
+the worker or kill the session reports the error and leaves the project in phase `failed` rather
+than retired; call `close_project` again to finish retiring it. A daemon that stops in the middle
+of a close does not carry it through either: the project comes back unretired, and the restart
+launches a diagnosis worker into it, so expect a live Claude Code session in the project you
+retired. Close it again.
 
 See "Recovery" and "Restart reconciliation" in [`docs/architecture.md`](docs/architecture.md) for
 how baton reaches phase `failed` and how it reconciles after a restart.

@@ -11,10 +11,14 @@ import pytest
 from baton.prompts import RECONCILIATION_REQUEST, WORKER_PREAMBLE, diagnosis_prompt
 
 TOOL_SIGNATURES = [
-    "initialize_project(project_path, initial_prompt, session_name=None, model=None)",
+    "initialize_project(project_path, title, initial_prompt, "
+    "session_name=None, model=None)",
+    "list_projects()",
+    "resume_project(project_id, prompt)",
+    "close_project(project_id)",
     "report_status(worker_id, message)",
     "report_lifecycle(worker_id, state, message=None, next_prompt=None)",
-    "get_project_status()",
+    "get_project_status(project_id)",
 ]
 
 LIFECYCLE_STATES = ["success", "completed", "failed", "blocked", "running"]
@@ -51,6 +55,11 @@ def test_preamble_names_the_worker_id_variable() -> None:
     assert "BATON_WORKER_ID" in WORKER_PREAMBLE
 
 
+def test_preamble_names_the_project_variable() -> None:
+    """WORKER_PREAMBLE names the BATON_PROJECT environment variable."""
+    assert "BATON_PROJECT" in WORKER_PREAMBLE
+
+
 def test_preamble_has_no_surrounding_whitespace() -> None:
     """WORKER_PREAMBLE is non-empty and carries no leading or trailing whitespace."""
     assert WORKER_PREAMBLE
@@ -65,6 +74,11 @@ def test_packaged_skill_file_loads(skill_text: str) -> None:
 def test_packaged_skill_frontmatter_names_baton_worker(skill_text: str) -> None:
     """The packaged skill's frontmatter names it baton-worker."""
     assert _skill_frontmatter_name(skill_text) == "baton-worker"
+
+
+def test_packaged_skill_names_the_project_variable(skill_text: str) -> None:
+    """The packaged skill names the BATON_PROJECT environment variable."""
+    assert "BATON_PROJECT" in skill_text
 
 
 @pytest.mark.parametrize("tool_signature", TOOL_SIGNATURES)

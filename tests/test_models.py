@@ -83,6 +83,7 @@ def test_lifecycle_state_members_spell_their_value(
         (ProjectPhase.terminating, "terminating"),
         (ProjectPhase.completed, "completed"),
         (ProjectPhase.failed, "failed"),
+        (ProjectPhase.closed, "closed"),
     ],
 )
 def test_project_phase_members_spell_their_value(
@@ -310,10 +311,12 @@ def test_worker_record_to_dict_maps_every_field(tmp_path: Path) -> None:
     }
 
 
-def test_project_state_fresh_is_uninitialized() -> None:
-    """fresh() returns an uninitialized state with every optional field None."""
-    state = ProjectState.fresh()
+def test_project_state_new_is_uninitialized() -> None:
+    """new() returns an uninitialized state with every optional field None."""
+    state = ProjectState.new("a1b2c3d4", "Widget factory")
 
+    assert state.project_id == "a1b2c3d4"
+    assert state.title == "Widget factory"
     assert state.phase == ProjectPhase.uninitialized
     assert state.project_path is None
     assert state.session_name is None
@@ -324,11 +327,11 @@ def test_project_state_fresh_is_uninitialized() -> None:
     assert state.recovery_attempts == 0
 
 
-def test_project_state_fresh_updated_at_is_timezone_aware_utc() -> None:
-    """fresh() stamps updated_at with a timezone-aware UTC value."""
+def test_project_state_new_updated_at_is_timezone_aware_utc() -> None:
+    """new() stamps updated_at with a timezone-aware UTC value."""
     before = datetime.now(UTC)
 
-    state = ProjectState.fresh()
+    state = ProjectState.new("a1b2c3d4", "Widget factory")
 
     after = datetime.now(UTC)
     assert state.updated_at.tzinfo == UTC
@@ -337,7 +340,7 @@ def test_project_state_fresh_updated_at_is_timezone_aware_utc() -> None:
 
 def test_project_state_updated_applies_changes() -> None:
     """updated() returns a copy with the given changes applied."""
-    state = ProjectState.fresh()
+    state = ProjectState.new("a1b2c3d4", "Widget factory")
 
     changed = state.updated(phase=ProjectPhase.running, session_name="baton-1")
 
@@ -348,7 +351,7 @@ def test_project_state_updated_applies_changes() -> None:
 def test_project_state_updated_leaves_other_fields_alone(tmp_path: Path) -> None:
     """updated() leaves fields not named in changes untouched."""
     project_path = tmp_path / "project"
-    state = ProjectState.fresh().updated(
+    state = ProjectState.new("a1b2c3d4", "Widget factory").updated(
         project_path=project_path, pane_target="baton:0.0"
     )
 
@@ -360,7 +363,7 @@ def test_project_state_updated_leaves_other_fields_alone(tmp_path: Path) -> None
 
 def test_project_state_updated_refreshes_updated_at() -> None:
     """updated() refreshes updated_at to a later-or-equal UTC value."""
-    state = ProjectState.fresh()
+    state = ProjectState.new("a1b2c3d4", "Widget factory")
 
     changed = state.updated(session_name="baton-1")
 
@@ -370,7 +373,7 @@ def test_project_state_updated_refreshes_updated_at() -> None:
 
 def test_project_state_updated_honors_an_explicit_updated_at() -> None:
     """updated() uses an explicit updated_at instead of refreshing it."""
-    state = ProjectState.fresh()
+    state = ProjectState.new("a1b2c3d4", "Widget factory")
     explicit = datetime(2020, 1, 1, tzinfo=UTC)
 
     changed = state.updated(updated_at=explicit)
@@ -380,7 +383,7 @@ def test_project_state_updated_honors_an_explicit_updated_at() -> None:
 
 def test_project_state_updated_leaves_the_original_unchanged() -> None:
     """updated() does not mutate the original, frozen instance."""
-    state = ProjectState.fresh()
+    state = ProjectState.new("a1b2c3d4", "Widget factory")
     original_phase = state.phase
     original_updated_at = state.updated_at
 
@@ -395,6 +398,8 @@ def test_project_state_to_dict_maps_every_field(tmp_path: Path) -> None:
     project_path = tmp_path / "project"
     prompt_path = tmp_path / "prompt.md"
     state = ProjectState(
+        project_id="a1b2c3d4",
+        title="Widget factory",
         phase=ProjectPhase.running,
         project_path=project_path,
         session_name="baton-project",
@@ -414,6 +419,8 @@ def test_project_state_to_dict_maps_every_field(tmp_path: Path) -> None:
     )
 
     assert state.to_dict() == {
+        "project_id": "a1b2c3d4",
+        "title": "Widget factory",
         "phase": "running",
         "project_path": str(project_path),
         "session_name": "baton-project",
@@ -438,6 +445,8 @@ def test_project_state_to_dict_maps_every_field(tmp_path: Path) -> None:
 def test_project_state_to_dict_preserves_absent_fields_as_none() -> None:
     """to_dict keeps an uninitialized state's optional fields as None."""
     state = ProjectState(
+        project_id="a1b2c3d4",
+        title="Widget factory",
         phase=ProjectPhase.uninitialized,
         project_path=None,
         session_name=None,
@@ -450,6 +459,8 @@ def test_project_state_to_dict_preserves_absent_fields_as_none() -> None:
     )
 
     assert state.to_dict() == {
+        "project_id": "a1b2c3d4",
+        "title": "Widget factory",
         "phase": "uninitialized",
         "project_path": None,
         "session_name": None,

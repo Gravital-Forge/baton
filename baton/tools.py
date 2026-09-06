@@ -1,15 +1,17 @@
 """Baton's MCP tool surface.
 
-Thin methods that validate their input, delegate to the supervisor, and
+Thin methods that validate their input, delegate to the coordinator, and
 shape the reply. The state machine — routing, phase logic, persistence —
-stays in `baton.engine`; nothing here reimplements it.
+stays in `baton.engine`, and project identity in `baton.coordinator`;
+nothing here reimplements either.
 """
 
 from pathlib import Path
 
 from mcp.server.mcpserver.exceptions import ToolError
 
-from baton.engine import Supervisor, SupervisorError
+from baton.coordinator import Coordinator, CoordinatorError
+from baton.engine import SupervisorError
 from baton.models import LifecycleState, ProjectState
 from baton.tmux import TmuxError
 
@@ -28,36 +30,71 @@ def _worker_id(state: ProjectState) -> str | None:
     return None if state.worker is None else state.worker.worker_id
 
 
+def _project_row(state: ProjectState) -> dict[str, object]:
+    """Shape one project's state as a row for list_projects.
+
+    Args:
+        state: The project state to shape.
+
+    Returns:
+        A mapping of the project's id, title, session name, project path
+        as a string, phase, current worker id, model, and the time its
+        state last changed as an ISO-8601 string.
+    """
+    return {
+        "project_id": state.project_id,
+        "title": state.title,
+        "session_name": state.session_name,
+        "project_path": (
+            None if state.project_path is None else str(state.project_path)
+        ),
+        "phase": state.phase.value,
+        "worker_id": _worker_id(state),
+        "model": state.model,
+        "updated_at": state.updated_at.isoformat(),
+    }
+
+
 class BatonTools:
-    """The MCP tools, bound to one supervisor.
+    """The MCP tools, bound to one coordinator.
 
     Each method's docstring is the tool description a worker reads, so it
     is written for that reader.
     """
 
-    def __init__(self, supervisor: Supervisor) -> None:
-        """Bind the tools to the supervisor every call delegates to.
+    def __init__(self, coordinator: Coordinator) -> None:
+        """Bind the tools to the coordinator every call delegates to.
 
         Args:
-            supervisor: The supervisor that runs baton's state machine.
+            coordinator: The coordinator holding every project baton
+                supervises.
         """
-        self._supervisor = supervisor
+        self._coordinator = coordinator
 
     async def initialize_project(
         self,
         project_path: str,
+        title: str,
         initial_prompt: str,
         session_name: str | None = None,
         model: str | None = None,
     ) -> dict[str, object]:
         """Create a project and launch its first worker.
 
-        The setup agent calls this, not a worker. Baton creates or reuses the
-        tmux session, installs the worker protocol skill in the project, and
-        launches the first worker with the initial prompt. One daemon
-        supervises one project, so the call is refused while a project has a
-        current worker. The initial prompt must not be blank, and neither may
-        a session name when you give one.
+        The setup agent calls this, not a worker. Baton mints the project an
+        id, creates its tmux session, installs the worker protocol skill in
+        the project, and launches the first worker with the initial prompt.
+        One daemon supervises many projects at once, and two projects may
+        share one project directory.
+
+        The title is a display name and need not be unique. It also names the
+        tmux session, as ``baton-`` followed by the title's slug: the title
+        lowercased, with every run of characters outside ``a-z0-9`` replaced
+        by a single ``-``, and leading and trailing ``-`` stripped. The call
+        is refused when that session name is already held by one of baton's
+        projects, or already exists in tmux; pass ``session_name`` to use
+        another. The title and the initial prompt must not be blank, and
+        neither may a session name when you give one.
 
         Every worker of this project runs on one explicitly chosen model:
         the ``model`` argument, else the daemon's ``BATON_MODEL``. The call
@@ -67,36 +104,130 @@ class BatonTools:
         Args:
             project_path: The project directory to supervise. It must already
                 exist.
+            title: The project's display name, and the source of its tmux
+                session name.
             initial_prompt: The task the first worker is launched with.
             session_name: The tmux session to use. Defaults to ``baton-``
-                followed by the project directory's name.
+                followed by the title's slug.
             model: The model every worker of this project runs on. Defaults
                 to the daemon's ``BATON_MODEL``.
 
         Returns:
-            The project's phase, the tmux session name, the worker pane's
-            target, the first worker's id, and the chosen model.
+            The new project's id, its phase, the tmux session name, the
+            worker pane's target, the first worker's id, and the chosen
+            model. The id is what every later call names this project by.
 
         Raises:
-            ToolError: If a project already has a current worker, or if
-                project_path is not an existing directory, or if the initial
-                prompt, a given session name, or a given model is blank, or
-                if model is omitted and BATON_MODEL is not set, or if the
+            ToolError: If the title is blank or holds no letter or digit; if
+                the session name is blank, already held by another project,
+                or already exists in tmux; if project_path is not an existing
+                directory; if the initial prompt or a given model is blank;
+                if model is omitted and BATON_MODEL is not set; or if the
                 tmux command needed to set up the session fails.
         """
         try:
-            state = await self._supervisor.initialize(
-                Path(project_path), initial_prompt, session_name, model
+            state = await self._coordinator.initialize(
+                Path(project_path), title, initial_prompt, session_name, model
             )
-        except (SupervisorError, TmuxError) as exc:
+        except (CoordinatorError, SupervisorError, TmuxError) as exc:
             raise ToolError(str(exc)) from exc
         return {
+            "project_id": state.project_id,
             "phase": state.phase.value,
             "session_name": state.session_name,
             "pane_target": state.pane_target,
             "worker_id": _worker_id(state),
             "model": state.model,
         }
+
+    async def list_projects(self) -> dict[str, object]:
+        """List every project baton is supervising, one compact row each.
+
+        The setup agent calls this, not a worker. A project you closed is
+        retired and is not listed. Read one project in full, with its
+        recent events, through ``get_project_status``.
+
+        Returns:
+            A ``projects`` list holding one row per project, in no
+            meaningful order, and empty when baton supervises none. Each
+            row carries the project's id, title, tmux session name,
+            project directory, phase, the current worker's id or None,
+            the model its workers run on, and the time its state last
+            changed, as an ISO-8601 string.
+        """
+        return {
+            "projects": [
+                _project_row(state) for state in self._coordinator.list_projects()
+            ]
+        }
+
+    async def resume_project(self, project_id: str, prompt: str) -> dict[str, object]:
+        """Carry a stopped project on by launching a fresh worker.
+
+        The setup agent calls this, not a worker. Use it on a project that
+        has stopped — one whose phase is ``completed`` or ``failed``. The
+        project keeps its id, title, tmux session and event log, and the
+        new worker runs on the model the project was created with. A
+        project that still has a worker is refused, and so is one you have
+        closed: closing retires a project for good.
+
+        The prompt is the whole of the new worker's context, exactly as an
+        initial prompt is. That worker remembers nothing of the workers
+        before it, so give it enough that its next action is unambiguous.
+
+        Args:
+            project_id: The id of the project to carry on.
+            prompt: The task the new worker is launched with. It must not
+                be blank.
+
+        Returns:
+            The project's phase and the id of the worker baton now
+            considers current.
+
+        Raises:
+            ToolError: If baton holds no project with that id; if the
+                project has not stopped; if the prompt is blank; or if the
+                tmux command needed to launch the worker fails.
+        """
+        try:
+            state = await self._coordinator.resume(project_id, prompt)
+        except (CoordinatorError, SupervisorError, TmuxError) as exc:
+            raise ToolError(str(exc)) from exc
+        return {"phase": state.phase.value, "worker_id": _worker_id(state)}
+
+    async def close_project(self, project_id: str) -> dict[str, object]:
+        """Retire a project for good, stopping any worker it still has.
+
+        The setup agent calls this, not a worker. Baton gives a running
+        worker the same grace period a terminal report gets, terminates
+        it, kills the project's tmux session, and frees that session name
+        for a new project. The project leaves ``list_projects``; its state
+        directory stays on disk as the record of what ran, and
+        ``get_project_status`` still reads it back. A closed project
+        cannot be resumed.
+
+        A project that is finishing with its current worker is refused.
+        That lasts seconds — call again.
+
+        Args:
+            project_id: The id of the project to retire.
+
+        Returns:
+            The project's phase, which is ``closed``, and its current
+            worker id, which is None.
+
+        Raises:
+            ToolError: If baton holds no project with that id; if the
+                project is finishing with its current worker; or if the
+                tmux command needed to kill its session fails. A worker
+                stopped before such a failure leaves the project
+                ``failed`` and not retired, so call again to retire it.
+        """
+        try:
+            state = await self._coordinator.close(project_id)
+        except (CoordinatorError, SupervisorError, TmuxError) as exc:
+            raise ToolError(str(exc)) from exc
+        return {"phase": state.phase.value, "worker_id": _worker_id(state)}
 
     async def report_status(self, worker_id: str, message: str) -> dict[str, object]:
         """Record a milestone. Baton takes no action on it.
@@ -114,13 +245,15 @@ class BatonTools:
             current.
 
         Raises:
-            ToolError: If worker_id is not the current worker's id.
+            ToolError: If worker_id is not the current worker of any project
+                baton holds.
         """
         try:
-            await self._supervisor.record_status(worker_id, message)
-        except SupervisorError as exc:
+            supervisor = self._coordinator.supervisor_for_worker(worker_id)
+            await supervisor.record_status(worker_id, message)
+        except (CoordinatorError, SupervisorError) as exc:
             raise ToolError(str(exc)) from exc
-        state = self._supervisor.snapshot()
+        state = supervisor.snapshot()
         return {"phase": state.phase.value, "worker_id": _worker_id(state)}
 
     async def report_lifecycle(
@@ -181,8 +314,9 @@ class BatonTools:
 
         Raises:
             ToolError: If the state is not one of the five, if the payload
-                breaks a rule, if worker_id is not the current worker's id, or
-                if the project is already terminating.
+                breaks a rule, if worker_id is not the current worker of any
+                project baton holds, or if the project is already
+                terminating.
         """
         try:
             lifecycle_state = LifecycleState(state)
@@ -193,31 +327,42 @@ class BatonTools:
             ) from exc
 
         try:
-            await self._supervisor.report_lifecycle(
+            supervisor = self._coordinator.supervisor_for_worker(worker_id)
+            await supervisor.report_lifecycle(
                 worker_id, lifecycle_state, message, next_prompt
             )
-        except SupervisorError as exc:
+        except (CoordinatorError, SupervisorError) as exc:
             raise ToolError(str(exc)) from exc
 
-        project_state = self._supervisor.snapshot()
+        project_state = supervisor.snapshot()
         return {
             "phase": project_state.phase.value,
             "worker_id": _worker_id(project_state),
         }
 
-    async def get_project_status(self) -> dict[str, object]:
-        """Read back the project's phase, worker, model, last report, and events.
+    async def get_project_status(self, project_id: str) -> dict[str, object]:
+        """Read back a project's phase, worker, model, last report, and events.
+
+        Args:
+            project_id: The id of the project to read. Your own project's id
+                is in the ``BATON_PROJECT`` environment variable.
 
         Returns:
             The project's phase, the current worker's id or None, the model
-            every worker of this project runs on or None before
-            initialization, the last lifecycle report as its state, message
-            and next prompt (None when nothing has been reported), and the
-            most recent events, oldest first, each carrying its ISO-8601
-            timestamp, kind, worker id, and payload.
+            every worker of this project runs on, the last lifecycle report
+            as its state, message and next prompt (None when nothing has been
+            reported), and the most recent events, oldest first, each
+            carrying its ISO-8601 timestamp, kind, worker id, and payload.
+
+        Raises:
+            ToolError: If baton holds no project with that id.
         """
-        state = self._supervisor.snapshot()
-        events = self._supervisor.recent_events(RECENT_EVENT_COUNT)
+        try:
+            supervisor = self._coordinator.supervisor(project_id)
+        except CoordinatorError as exc:
+            raise ToolError(str(exc)) from exc
+        state = supervisor.snapshot()
+        events = supervisor.recent_events(RECENT_EVENT_COUNT)
         last_report = state.last_report
         return {
             "phase": state.phase.value,

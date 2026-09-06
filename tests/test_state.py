@@ -7,6 +7,7 @@ from typing import NoReturn
 
 import pytest
 
+from baton.config import BatonConfig
 from baton.models import (
     EventKind,
     LifecycleReport,
@@ -15,9 +16,16 @@ from baton.models import (
     ProjectState,
     WorkerRecord,
 )
-from baton.state import StateStore
+from baton.state import (
+    StateStore,
+    legacy_state_path,
+    list_project_ids,
+    project_state_dir,
+)
 
 GOOD_STATE_JSON = {
+    "project_id": "a1b2c3d4",
+    "title": "Widget factory",
     "phase": "running",
     "project_path": None,
     "session_name": None,
@@ -52,6 +60,8 @@ def populated_state(tmp_path: Path) -> ProjectState:
         next_prompt="do the next thing",
     )
     return ProjectState(
+        project_id="a1b2c3d4",
+        title="Widget factory",
         phase=ProjectPhase.running,
         project_path=tmp_path / "proj",
         session_name="baton",
@@ -64,25 +74,19 @@ def populated_state(tmp_path: Path) -> ProjectState:
     )
 
 
-def test_init_does_not_touch_the_filesystem(store: StateStore, tmp_path: Path) -> None:
+def test_init_does_not_touch_the_filesystem(
+    store: StateStore, config: BatonConfig, project_id: str
+) -> None:
     """A store built on a nonexistent directory leaves it nonexistent."""
-    assert not store.state_dir.exists()
-    assert store.state_dir == tmp_path / "state"
-    assert store.state_path == store.state_dir / "state.json"
-    assert store.events_path == store.state_dir / "events.jsonl"
+    assert not store.project_state_dir.exists()
+    assert store.project_state_dir == config.state_dir / "projects" / project_id
+    assert store.state_path == store.project_state_dir / "state.json"
+    assert store.events_path == store.project_state_dir / "events.jsonl"
 
 
-def test_load_on_empty_directory_returns_fresh_state(store: StateStore) -> None:
-    """load() on a missing state file returns a fresh, uninitialized state."""
-    state = store.load()
-
-    assert state.phase == ProjectPhase.uninitialized
-    assert state.project_path is None
-    assert state.session_name is None
-    assert state.pane_target is None
-    assert state.worker is None
-    assert state.last_report is None
-    assert state.updated_at.tzinfo == UTC
+def test_load_with_no_state_file_returns_none(store: StateStore) -> None:
+    """load() returns None when the project has no state file yet."""
+    assert store.load() is None
 
 
 def test_round_trip_fully_populated(
@@ -116,6 +120,8 @@ def test_round_trip_with_optionals_none(store: StateStore, tmp_path: Path) -> No
     )
     report = LifecycleReport(state=LifecycleState.blocked, message="waiting on input")
     state = ProjectState(
+        project_id="a1b2c3d4",
+        title="Widget factory",
         phase=ProjectPhase.blocked,
         project_path=None,
         session_name=None,
@@ -148,7 +154,7 @@ def _write_state_file(store: StateStore, text: str) -> None:
         store: The store whose state file to write.
         text: The exact file contents, valid JSON or not.
     """
-    store.state_dir.mkdir(parents=True, exist_ok=True)
+    store.project_state_dir.mkdir(parents=True, exist_ok=True)
     store.state_path.write_text(text, encoding="utf-8")
 
 
@@ -194,6 +200,23 @@ def test_load_rejects_a_state_file_missing_model(store: StateStore) -> None:
         store.load()
 
 
+@pytest.mark.parametrize("key", ["project_id", "title"])
+def test_load_rejects_a_state_file_missing_an_identity_key(
+    store: StateStore, key: str
+) -> None:
+    """load() raises KeyError when state.json lacks the id or the title.
+
+    Args:
+        store: The store under test.
+        key: The identity key left out of the written file.
+    """
+    without_key = {k: v for k, v in GOOD_STATE_JSON.items() if k != key}
+    _write_state_file(store, json.dumps(without_key))
+
+    with pytest.raises(KeyError):
+        store.load()
+
+
 def test_load_revalidates_a_persisted_report(store: StateStore) -> None:
     """A persisted report that breaks a payload rule is rejected on load."""
     illegal = {
@@ -210,7 +233,9 @@ def test_load_revalidates_a_persisted_report(store: StateStore) -> None:
 
 def test_round_trip_with_no_worker_and_no_report(store: StateStore) -> None:
     """A state with no worker and no report round-trips, writing JSON nulls."""
-    state = ProjectState.fresh().updated(phase=ProjectPhase.completed)
+    state = ProjectState.new("a1b2c3d4", "Widget factory").updated(
+        phase=ProjectPhase.completed
+    )
 
     store.save(state)
     loaded = store.load()
@@ -227,11 +252,11 @@ def test_save_creates_the_state_directory(
     store: StateStore, populated_state: ProjectState
 ) -> None:
     """save() creates the state directory when it does not yet exist."""
-    assert not store.state_dir.exists()
+    assert not store.project_state_dir.exists()
 
     store.save(populated_state)
 
-    assert store.state_dir.exists()
+    assert store.project_state_dir.exists()
     assert store.state_path.exists()
 
 
@@ -245,6 +270,8 @@ def test_on_disk_json_has_pinned_shape(
     raw = json.loads(raw_text)
 
     assert list(raw.keys()) == [
+        "project_id",
+        "title",
         "phase",
         "project_path",
         "session_name",
@@ -255,6 +282,8 @@ def test_on_disk_json_has_pinned_shape(
         "recovery_attempts",
         "updated_at",
     ]
+    assert raw["project_id"] == "a1b2c3d4"
+    assert raw["title"] == "Widget factory"
     assert raw["phase"] == "running"
     assert raw["project_path"] == str(populated_state.project_path)
     assert raw["session_name"] == "baton"
@@ -313,7 +342,7 @@ def test_save_failure_leaves_previous_state_unchanged(
     after_bytes = store.state_path.read_bytes()
     assert after_bytes == before_bytes
     assert store.load() == populated_state
-    assert not (store.state_dir / "state.json.tmp").exists()
+    assert not (store.project_state_dir / "state.json.tmp").exists()
 
 
 def test_save_failure_leaves_no_state_file_when_none_existed(
@@ -328,7 +357,7 @@ def test_save_failure_leaves_no_state_file_when_none_existed(
         store.save(populated_state)
 
     assert not store.state_path.exists()
-    assert not (store.state_dir / "state.json.tmp").exists()
+    assert not (store.project_state_dir / "state.json.tmp").exists()
 
 
 def test_append_event_returns_the_event(store: StateStore) -> None:
@@ -432,3 +461,123 @@ def test_every_event_kind_round_trips(store: StateStore, kind: EventKind) -> Non
     recent = store.recent_events(1)
 
     assert recent[0].kind == kind
+
+
+def _write_project_state(state_dir: Path, project_id: str) -> Path:
+    """Create a project directory under the state directory, with a state.json.
+
+    Args:
+        state_dir: The state directory to create the project under.
+        project_id: The id naming the project's directory.
+
+    Returns:
+        The created project directory.
+    """
+    persisted = state_dir / "projects" / project_id
+    persisted.mkdir(parents=True)
+    (persisted / "state.json").write_text("{}", encoding="utf-8")
+    return persisted
+
+
+def test_project_state_dir_composes_projects_and_id(tmp_path: Path) -> None:
+    """project_state_dir composes <state dir>/projects/<project id>."""
+    state_dir = tmp_path / "state"
+
+    composed = project_state_dir(state_dir, "a1b2c3d4")
+
+    assert composed == state_dir / "projects" / "a1b2c3d4"
+
+
+def test_project_state_dir_does_not_touch_the_filesystem(tmp_path: Path) -> None:
+    """project_state_dir composes a path without creating any directory."""
+    state_dir = tmp_path / "state"
+
+    composed = project_state_dir(state_dir, "a1b2c3d4")
+
+    assert not composed.exists()
+    assert not state_dir.exists()
+
+
+def test_list_project_ids_returns_every_persisted_id_sorted(tmp_path: Path) -> None:
+    """list_project_ids returns the ids under projects/, sorted."""
+    state_dir = tmp_path / "state"
+    _write_project_state(state_dir, "c3d4e5f6")
+    _write_project_state(state_dir, "a1b2c3d4")
+    _write_project_state(state_dir, "b2c3d4e5")
+
+    assert list_project_ids(state_dir) == ["a1b2c3d4", "b2c3d4e5", "c3d4e5f6"]
+
+
+def test_list_project_ids_skips_a_directory_without_a_state_file(
+    tmp_path: Path,
+) -> None:
+    """A directory under projects/ with no state.json is not a project."""
+    state_dir = tmp_path / "state"
+    _write_project_state(state_dir, "a1b2c3d4")
+    (state_dir / "projects" / "halfbuilt").mkdir()
+
+    assert list_project_ids(state_dir) == ["a1b2c3d4"]
+
+
+def test_list_project_ids_skips_a_file_beside_the_project_directories(
+    tmp_path: Path,
+) -> None:
+    """A plain file under projects/ is not a project."""
+    state_dir = tmp_path / "state"
+    _write_project_state(state_dir, "a1b2c3d4")
+    (state_dir / "projects" / "stray.txt").write_text("x", encoding="utf-8")
+
+    assert list_project_ids(state_dir) == ["a1b2c3d4"]
+
+
+def test_list_project_ids_on_a_missing_projects_directory_returns_empty(
+    tmp_path: Path,
+) -> None:
+    """list_project_ids returns [] when projects/ does not exist."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    assert list_project_ids(state_dir) == []
+
+
+def test_list_project_ids_on_a_missing_state_directory_returns_empty(
+    tmp_path: Path,
+) -> None:
+    """list_project_ids returns [] when the state directory itself is absent."""
+    assert list_project_ids(tmp_path / "state") == []
+
+
+def test_legacy_state_path_finds_a_root_level_state_file(tmp_path: Path) -> None:
+    """legacy_state_path returns the root state.json when one exists."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    legacy = state_dir / "state.json"
+    legacy.write_text("{}", encoding="utf-8")
+
+    assert legacy_state_path(state_dir) == legacy
+
+
+def test_legacy_state_path_returns_none_when_there_is_none(tmp_path: Path) -> None:
+    """legacy_state_path returns None when the root holds no state.json."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    assert legacy_state_path(state_dir) is None
+
+
+def test_legacy_state_path_ignores_a_project_state_file(tmp_path: Path) -> None:
+    """A state.json under projects/ is the current layout, not a legacy one."""
+    state_dir = tmp_path / "state"
+    _write_project_state(state_dir, "a1b2c3d4")
+
+    assert legacy_state_path(state_dir) is None
+
+
+def test_legacy_state_path_does_not_parse_the_file(tmp_path: Path) -> None:
+    """legacy_state_path reports the path of a file it cannot decode."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    legacy = state_dir / "state.json"
+    legacy.write_text("not json at all", encoding="utf-8")
+
+    assert legacy_state_path(state_dir) == legacy

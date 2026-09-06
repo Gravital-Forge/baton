@@ -33,6 +33,7 @@ class ProjectPhase(StrEnum):
     terminating = "terminating"
     completed = "completed"
     failed = "failed"
+    closed = "closed"
 
 
 class EventKind(StrEnum):
@@ -167,6 +168,8 @@ class ProjectState:
     """The supervised project's current state.
 
     Attributes:
+        project_id: The identifier baton minted for this project.
+        title: The project's display name, chosen by whoever created it.
         phase: The project's current phase.
         project_path: The project directory baton is supervising, or
             None before initialization.
@@ -186,6 +189,8 @@ class ProjectState:
             responsible for passing a timezone-aware UTC value.
     """
 
+    project_id: str
+    title: str
     phase: ProjectPhase
     project_path: Path | None
     session_name: str | None
@@ -197,15 +202,21 @@ class ProjectState:
     updated_at: datetime
 
     @classmethod
-    def fresh(cls) -> Self:
-        """Build the state of a project baton has not yet initialized.
+    def new(cls, project_id: str, title: str) -> Self:
+        """Build the state of a project baton has minted but not initialized.
+
+        Args:
+            project_id: The identifier baton minted for the project.
+            title: The project's display name.
 
         Returns:
-            A ProjectState in phase ``uninitialized``, with every
-            optional field None, recovery_attempts at 0, and updated_at
-            stamped to now.
+            A ProjectState in phase ``uninitialized``, carrying the given
+            id and title, with every optional field None,
+            recovery_attempts at 0, and updated_at stamped to now.
         """
         return cls(
+            project_id=project_id,
+            title=title,
             phase=ProjectPhase.uninitialized,
             project_path=None,
             session_name=None,
@@ -235,13 +246,16 @@ class ProjectState:
         """Shape this state as a JSON-ready mapping.
 
         Returns:
-            A mapping of the phase as the enum's value string, the
-            project path as a string, the session name, the pane target,
-            the worker and last report as their own mappings, the model,
-            the recovery attempt count, and updated_at as an ISO 8601
-            string. Every None is preserved.
+            A mapping of the project id, the title, the phase as the
+            enum's value string, the project path as a string, the
+            session name, the pane target, the worker and last report as
+            their own mappings, the model, the recovery attempt count,
+            and updated_at as an ISO 8601 string. Every None is
+            preserved.
         """
         return {
+            "project_id": self.project_id,
+            "title": self.title,
             "phase": self.phase.value,
             "project_path": (
                 None if self.project_path is None else str(self.project_path)

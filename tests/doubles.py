@@ -1,4 +1,4 @@
-"""Test doubles standing in for baton's adapters and its supervisor.
+"""Test doubles standing in for baton's adapters, its supervisor, and its coordinator.
 
 Each double records what it was called with and runs no real command, no
 real process, and no real state machine. `tests/conftest.py` hands the
@@ -10,6 +10,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from baton.coordinator import CoordinatorError
 from baton.engine import SupervisorError
 from baton.models import (
     Event,
@@ -17,6 +18,7 @@ from baton.models import (
     ProjectState,
     WorkerRecord,
 )
+from baton.state import project_state_dir
 from baton.tmux import PaneInfo
 
 
@@ -29,8 +31,9 @@ class FakeTmux:
         sessions: Sequence[str] = (),
         pane_infos: Sequence[PaneInfo] = (),
         create_error: Exception | None = None,
+        kill_session_errors: Sequence[Exception | None] = (),
         pane_info_error: Exception | None = None,
-        kill_errors: Sequence[Exception | None] = (),
+        signal_errors: Sequence[Exception | None] = (),
         send_error: Exception | None = None,
     ) -> None:
         """Store the scripted sessions, pane readings, and errors.
@@ -42,9 +45,12 @@ class FakeTmux:
                 scripted, `pane_info` returns a dead pane with no pid.
             create_error: The exception `create_session` raises, when set,
                 instead of recording the call.
+            kill_session_errors: What `kill_session` raises on each call,
+                in call order, where `None` is a kill that lands. The last
+                entry repeats once they run out.
             pane_info_error: The exception `pane_info` raises, when set,
                 instead of recording the call and returning a reading.
-            kill_errors: What `signal_pane` raises on each call, in call
+            signal_errors: What `signal_pane` raises on each call, in call
                 order, where `None` is a signal that lands. The last entry
                 repeats once they run out.
             send_error: The exception `send_keys` raises, when set, instead
@@ -53,11 +59,13 @@ class FakeTmux:
         self.sessions: set[str] = set(sessions)
         self._pane_infos = list(pane_infos)
         self._create_error = create_error
+        self._kill_session_errors = list(kill_session_errors)
         self._pane_info_error = pane_info_error
-        self._kill_errors = list(kill_errors)
+        self._signal_errors = list(signal_errors)
         self._send_error = send_error
         self.has_session_calls: list[str] = []
         self.created: list[dict[str, object]] = []
+        self.kill_session_calls: list[str] = []
         self.respawn_calls: list[dict[str, object]] = []
         self.pane_info_calls: list[str] = []
         self.signals: list[tuple[int, int]] = []
@@ -89,6 +97,27 @@ class FakeTmux:
             raise self._create_error
         self.created.append({"session": session, "start_dir": start_dir})
         self.sessions.add(session)
+
+    def kill_session(self, session: str) -> None:
+        """Record the call, then raise this call's scripted error, if any.
+
+        Args:
+            session: The name of the session to kill.
+
+        Raises:
+            Exception: The error scripted for this call, when one was. The
+                session stays in the existing set, the way a kill that
+                failed leaves it alive.
+        """
+        self.kill_session_calls.append(session)
+        if self._kill_session_errors:
+            index = min(
+                len(self.kill_session_calls) - 1, len(self._kill_session_errors) - 1
+            )
+            error = self._kill_session_errors[index]
+            if error is not None:
+                raise error
+        self.sessions.discard(session)
 
     def respawn_pane(
         self, target: str, start_dir: Path, env: Mapping[str, str], command: str
@@ -157,10 +186,10 @@ class FakeTmux:
             Exception: The error scripted for this call, when one was.
         """
         self.signals.append((pid, signum))
-        if not self._kill_errors:
+        if not self._signal_errors:
             return
-        index = min(len(self.signals) - 1, len(self._kill_errors) - 1)
-        error = self._kill_errors[index]
+        index = min(len(self.signals) - 1, len(self._signal_errors) - 1)
+        error = self._signal_errors[index]
         if error is not None:
             raise error
 
@@ -191,11 +220,17 @@ class FakeLauncher:
         self.installs: list[Path] = []
 
     def launch(
-        self, project_path: Path, pane_target: str, prompt: str, model: str
+        self,
+        project_id: str,
+        project_path: Path,
+        pane_target: str,
+        prompt: str,
+        model: str,
     ) -> WorkerRecord:
         """Record the call, write the prompt file, and return a worker record.
 
         Args:
+            project_id: The id of the project the worker belongs to.
             project_path: The directory the worker's pane starts in.
             pane_target: The tmux pane the worker is launched into.
             prompt: The task prompt given to the worker.
@@ -210,6 +245,7 @@ class FakeLauncher:
         self._raise_scripted_launch_error()
         self.launches.append(
             {
+                "project_id": project_id,
                 "project_path": project_path,
                 "pane_target": pane_target,
                 "prompt": prompt,
@@ -217,7 +253,9 @@ class FakeLauncher:
             }
         )
         worker_id = f"worker-{len(self.launches)}"
-        worker_dir = self._state_dir / "workers" / worker_id
+        worker_dir = (
+            project_state_dir(self._state_dir, project_id) / "workers" / worker_id
+        )
         worker_dir.mkdir(parents=True, exist_ok=True)
         prompt_path = worker_dir / "prompt.md"
         prompt_path.write_text(prompt, encoding="utf-8")
@@ -255,12 +293,12 @@ class FakeLauncher:
 
 
 class StubSupervisor:
-    """A stand-in for `Supervisor` that records calls and can raise on cue.
+    """A stand-in for one project's `Supervisor` that can raise on cue.
 
-    Each of the four methods `BatonTools` delegates to records the
-    arguments it received, unless a scripted error was given for it, in
-    which case it raises that instead. `snapshot` and `recent_events`
-    always return what was scripted.
+    Each of the two methods `BatonTools` delegates to a supervisor
+    records the arguments it received, unless a scripted error was given
+    for it, in which case it raises that instead. `snapshot` and
+    `recent_events` always return what was scripted.
     """
 
     def __init__(
@@ -268,68 +306,29 @@ class StubSupervisor:
         *,
         state: ProjectState | None = None,
         events: list[Event] | None = None,
-        initialize_error: Exception | None = None,
         record_status_error: SupervisorError | None = None,
         report_lifecycle_error: SupervisorError | None = None,
     ) -> None:
         """Store the state and events to return, and the errors to raise.
 
         Args:
-            state: The `ProjectState` `snapshot` returns, and that
-                `initialize` returns unless `initialize_error` is set.
-                Defaults to `ProjectState.fresh()`.
+            state: The `ProjectState` `snapshot` returns. Defaults to
+                `ProjectState.new("a1b2c3d4", "Widget factory")`.
             events: The events `recent_events` returns. Defaults to none.
-            initialize_error: The error `initialize` raises, when set,
-                instead of recording its call. Widened beyond
-                `SupervisorError` so a test can script a `TmuxError`.
             record_status_error: The error `record_status` raises, when
                 set, instead of recording its call.
             report_lifecycle_error: The error `report_lifecycle` raises,
                 when set, instead of recording its call.
         """
-        self._state = ProjectState.fresh() if state is None else state
+        self._state = (
+            ProjectState.new("a1b2c3d4", "Widget factory") if state is None else state
+        )
         self._events = [] if events is None else events
-        self._initialize_error = initialize_error
         self._record_status_error = record_status_error
         self._report_lifecycle_error = report_lifecycle_error
-        self.initialize_calls: list[dict[str, object]] = []
         self.record_status_calls: list[dict[str, object]] = []
         self.report_lifecycle_calls: list[dict[str, object]] = []
         self.recent_events_calls: list[int] = []
-        self.hook_calls: list[str] = []
-
-    async def initialize(
-        self,
-        project_path: Path,
-        initial_prompt: str,
-        session_name: str | None = None,
-        model: str | None = None,
-    ) -> ProjectState:
-        """Record the call and return the scripted state, or raise.
-
-        Args:
-            project_path: The project directory passed in.
-            initial_prompt: The initial prompt passed in.
-            session_name: The session name passed in.
-            model: The model passed in.
-
-        Returns:
-            The scripted state.
-
-        Raises:
-            Exception: `initialize_error`, when one was scripted.
-        """
-        if self._initialize_error is not None:
-            raise self._initialize_error
-        self.initialize_calls.append(
-            {
-                "project_path": project_path,
-                "initial_prompt": initial_prompt,
-                "session_name": session_name,
-                "model": model,
-            }
-        )
-        return self._state
 
     async def record_status(self, worker_id: str, message: str) -> None:
         """Record the call, or raise the scripted error.
@@ -395,10 +394,176 @@ class StubSupervisor:
         self.recent_events_calls.append(count)
         return self._events
 
+
+class StubCoordinator:
+    """A stand-in for `Coordinator` that hands back one stub supervisor.
+
+    Every lookup returns the same stub supervisor, or raises the scripted
+    lookup error. A test that wants a particular state or event log
+    scripts that supervisor and passes it in.
+    """
+
+    def __init__(
+        self,
+        *,
+        supervisor: StubSupervisor | None = None,
+        projects: Sequence[ProjectState] = (),
+        initialize_error: Exception | None = None,
+        resume_error: Exception | None = None,
+        close_error: Exception | None = None,
+        lookup_error: CoordinatorError | None = None,
+    ) -> None:
+        """Store the supervisor to hand back and the errors to raise.
+
+        Args:
+            supervisor: The `StubSupervisor` every lookup returns, and
+                whose snapshot `initialize` returns. Defaults to a
+                default `StubSupervisor`.
+            projects: What `list_projects` returns. Defaults to none.
+            initialize_error: The error `initialize` raises, when set,
+                instead of recording its call. Widened beyond
+                `CoordinatorError` so a test can script a `TmuxError` or
+                a `SupervisorError`.
+            resume_error: The error `resume` raises, when set, instead of
+                recording its call. Widened beyond `CoordinatorError` so a
+                test can script a `SupervisorError` or a `TmuxError`.
+            close_error: The error `close` raises, when set, instead of
+                recording its call. Widened beyond `CoordinatorError` so a
+                test can script a `SupervisorError` or a `TmuxError`.
+            lookup_error: The error `supervisor_for_worker` and
+                `supervisor` raise, when set, instead of handing back the
+                supervisor.
+        """
+        self._supervisor = StubSupervisor() if supervisor is None else supervisor
+        self._projects = list(projects)
+        self._initialize_error = initialize_error
+        self._resume_error = resume_error
+        self._close_error = close_error
+        self._lookup_error = lookup_error
+        self.initialize_calls: list[dict[str, object]] = []
+        self.resume_calls: list[dict[str, object]] = []
+        self.close_calls: list[str] = []
+        self.supervisor_for_worker_calls: list[str] = []
+        self.supervisor_calls: list[str] = []
+        self.hook_calls: list[str] = []
+
+    async def initialize(
+        self,
+        project_path: Path,
+        title: str,
+        initial_prompt: str,
+        session_name: str | None = None,
+        model: str | None = None,
+    ) -> ProjectState:
+        """Record the call and return the supervisor's state, or raise.
+
+        Args:
+            project_path: The project directory passed in.
+            title: The title passed in.
+            initial_prompt: The initial prompt passed in.
+            session_name: The session name passed in.
+            model: The model passed in.
+
+        Returns:
+            The scripted supervisor's state.
+
+        Raises:
+            Exception: `initialize_error`, when one was scripted.
+        """
+        if self._initialize_error is not None:
+            raise self._initialize_error
+        self.initialize_calls.append(
+            {
+                "project_path": project_path,
+                "title": title,
+                "initial_prompt": initial_prompt,
+                "session_name": session_name,
+                "model": model,
+            }
+        )
+        return self._supervisor.snapshot()
+
+    def list_projects(self) -> list[ProjectState]:
+        """Return the scripted project states.
+
+        Returns:
+            The states given to the constructor, in the order given.
+        """
+        return list(self._projects)
+
+    async def resume(self, project_id: str, prompt: str) -> ProjectState:
+        """Record the call and return the supervisor's state, or raise.
+
+        Args:
+            project_id: The project id passed in.
+            prompt: The prompt passed in.
+
+        Returns:
+            The scripted supervisor's state.
+
+        Raises:
+            Exception: `resume_error`, when one was scripted.
+        """
+        if self._resume_error is not None:
+            raise self._resume_error
+        self.resume_calls.append({"project_id": project_id, "prompt": prompt})
+        return self._supervisor.snapshot()
+
+    async def close(self, project_id: str) -> ProjectState:
+        """Record the call and return the supervisor's state, or raise.
+
+        Args:
+            project_id: The project id passed in.
+
+        Returns:
+            The scripted supervisor's state.
+
+        Raises:
+            Exception: `close_error`, when one was scripted.
+        """
+        if self._close_error is not None:
+            raise self._close_error
+        self.close_calls.append(project_id)
+        return self._supervisor.snapshot()
+
+    def supervisor_for_worker(self, worker_id: str) -> StubSupervisor:
+        """Record the lookup and hand back the scripted supervisor, or raise.
+
+        Args:
+            worker_id: The worker id looked up.
+
+        Returns:
+            The scripted supervisor.
+
+        Raises:
+            CoordinatorError: `lookup_error`, when one was scripted.
+        """
+        self.supervisor_for_worker_calls.append(worker_id)
+        if self._lookup_error is not None:
+            raise self._lookup_error
+        return self._supervisor
+
+    def supervisor(self, project_id: str) -> StubSupervisor:
+        """Record the lookup and hand back the scripted supervisor, or raise.
+
+        Args:
+            project_id: The project id looked up.
+
+        Returns:
+            The scripted supervisor.
+
+        Raises:
+            CoordinatorError: `lookup_error`, when one was scripted.
+        """
+        self.supervisor_calls.append(project_id)
+        if self._lookup_error is not None:
+            raise self._lookup_error
+        return self._supervisor
+
     async def start(self) -> None:
-        """Record that the pane watchdog was started."""
+        """Record that the daemon's watchdog was started."""
         self.hook_calls.append("start")
 
     async def shutdown(self) -> None:
-        """Record that the pane watchdog was stopped and work drained."""
+        """Record that the watchdog was stopped and every project drained."""
         self.hook_calls.append("shutdown")
