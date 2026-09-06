@@ -1,5 +1,7 @@
 """Tests for baton.server."""
 
+import json
+
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError, UnexpectedToolError
 from starlette.routing import Mount
@@ -7,6 +9,7 @@ from starlette.routing import Mount
 from baton.config import BatonConfig
 from baton.coordinator import Coordinator, CoordinatorError
 from baton.engine import SupervisorError
+from baton.models import ProjectState
 from baton.server import build_app, build_coordinator, build_server
 from baton.tools import BatonTools
 from tests.doubles import StubCoordinator, StubSupervisor
@@ -94,6 +97,34 @@ async def test_report_lifecycle_description_states_message_and_finality_rules(
 
     assert "checked first" in description
     assert "terminal report is final" in description
+
+
+@pytest.mark.anyio
+async def test_list_projects_answers_two_projects_in_one_content_block(
+    make_stub_coordinator: type[StubCoordinator],
+) -> None:
+    """Two projects reach the caller as one content block carrying both.
+
+    A tool that returns a bare list is serialized one content block per
+    element, so a caller reading the first block would silently drop
+    every project after the first.
+    """
+    stub = make_stub_coordinator(
+        projects=[
+            ProjectState.new("a1b2c3d4", "One"),
+            ProjectState.new("e5f6a7b8", "Two"),
+        ]
+    )
+    server = build_server(stub)
+
+    result = await server.call_tool("list_projects", {})
+
+    [block] = result.content
+    payload = json.loads(block.text)
+    assert [row["project_id"] for row in payload["projects"]] == [
+        "a1b2c3d4",
+        "e5f6a7b8",
+    ]
 
 
 @pytest.mark.anyio

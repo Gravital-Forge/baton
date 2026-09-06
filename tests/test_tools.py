@@ -542,28 +542,30 @@ async def test_list_projects_returns_a_row_per_project(
 
     result = await tools.list_projects()
 
-    assert result == [
-        {
-            "project_id": "a1b2c3d4",
-            "title": "Widget factory",
-            "session_name": "baton-widget-factory",
-            "project_path": str(tmp_path),
-            "phase": "running",
-            "worker_id": "worker-1",
-            "model": "sonnet",
-            "updated_at": "2026-01-01T00:00:00+00:00",
-        }
-    ]
+    assert result == {
+        "projects": [
+            {
+                "project_id": "a1b2c3d4",
+                "title": "Widget factory",
+                "session_name": "baton-widget-factory",
+                "project_path": str(tmp_path),
+                "phase": "running",
+                "worker_id": "worker-1",
+                "model": "sonnet",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            }
+        ]
+    }
 
 
 @pytest.mark.anyio
-async def test_list_projects_with_no_project_returns_no_row(
+async def test_list_projects_with_no_project_returns_an_empty_projects_list(
     make_stub_coordinator: type[StubCoordinator],
 ) -> None:
-    """list_projects returns no row when baton holds no project."""
+    """list_projects returns an empty projects list when baton holds none."""
     tools = BatonTools(make_stub_coordinator())
 
-    assert await tools.list_projects() == []
+    assert await tools.list_projects() == {"projects": []}
 
 
 @pytest.mark.anyio

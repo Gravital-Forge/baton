@@ -140,7 +140,7 @@ class BatonTools:
             "model": state.model,
         }
 
-    async def list_projects(self) -> list[dict[str, object]]:
+    async def list_projects(self) -> dict[str, object]:
         """List every project baton is supervising, one compact row each.
 
         The setup agent calls this, not a worker. A project you closed is
@@ -148,13 +148,18 @@ class BatonTools:
         recent events, through ``get_project_status``.
 
         Returns:
-            One row per project, in no meaningful order. Each carries the
-            project's id, title, tmux session name, project directory,
-            phase, the current worker's id or None, the model its workers
-            run on, and the time its state last changed, as an ISO-8601
-            string.
+            A ``projects`` list holding one row per project, in no
+            meaningful order, and empty when baton supervises none. Each
+            row carries the project's id, title, tmux session name,
+            project directory, phase, the current worker's id or None,
+            the model its workers run on, and the time its state last
+            changed, as an ISO-8601 string.
         """
-        return [_project_row(state) for state in self._coordinator.list_projects()]
+        return {
+            "projects": [
+                _project_row(state) for state in self._coordinator.list_projects()
+            ]
+        }
 
     async def resume_project(self, project_id: str, prompt: str) -> dict[str, object]:
         """Carry a stopped project on by launching a fresh worker.
