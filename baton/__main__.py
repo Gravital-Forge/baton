@@ -3,21 +3,21 @@
 import uvicorn
 
 from baton.config import BatonConfig
-from baton.server import build_app, build_server, build_supervisor
+from baton.server import build_app, build_coordinator, build_server
 from baton.worker import write_mcp_config
 
 
 def main() -> None:
     """Build baton's collaborators and serve its MCP app under uvicorn.
 
-    The app's lifespan runs the supervisor's `start` and `shutdown` hooks
-    around uvicorn's serving life.
+    The app's lifespan runs the coordinator's `start` and `shutdown`
+    hooks around uvicorn's serving life.
     """
     config = BatonConfig.from_env()
     write_mcp_config(config)
-    supervisor = build_supervisor(config)
-    server = build_server(supervisor)
-    app = build_app(supervisor, server, config)
+    coordinator = build_coordinator(config)
+    server = build_server(coordinator)
+    app = build_app(coordinator, server, config)
     uvicorn.run(app, host=config.host, port=config.port)
 
 

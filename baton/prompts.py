@@ -19,6 +19,9 @@ Your worker id is in the `BATON_WORKER_ID` environment variable. Pass that
 id on every report you make: `report_status` and `report_lifecycle` both
 take it.
 
+Your project's id is in the `BATON_PROJECT` environment variable. That id
+is what `get_project_status` takes.
+
 Printed text is never a lifecycle report. Only a baton tool call reports
 lifecycle."""
 

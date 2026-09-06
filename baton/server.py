@@ -1,4 +1,4 @@
-"""Wires baton's collaborators into a supervisor and an MCP server."""
+"""Wires baton's collaborators into a coordinator and an MCP server."""
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -8,37 +8,35 @@ from starlette.applications import Starlette
 from starlette.routing import Mount
 
 from baton.config import BatonConfig
-from baton.engine import Supervisor
-from baton.state import StateStore
+from baton.coordinator import Coordinator
 from baton.tmux import TmuxAdapter
 from baton.tools import BatonTools
 from baton.worker import WorkerLauncher
 
 
-def build_supervisor(config: BatonConfig) -> Supervisor:
-    """Build the supervisor and the collaborators it runs on.
+def build_coordinator(config: BatonConfig) -> Coordinator:
+    """Build the coordinator and the collaborators it runs on.
 
     Args:
         config: The runtime configuration governing every collaborator.
 
     Returns:
-        A Supervisor loaded from any state already on disk, or a fresh,
-        uninitialized one when there is none.
+        A Coordinator holding a supervisor for every project already
+        persisted under the state directory.
+
+    Raises:
+        CoordinatorError: If the state directory holds a single-project
+            state.json at its root.
     """
     tmux = TmuxAdapter(config.tmux_bin)
-    return Supervisor(
-        config,
-        StateStore(config.state_dir),
-        tmux,
-        WorkerLauncher(config, tmux),
-    )
+    return Coordinator(config, tmux, WorkerLauncher(config, tmux))
 
 
-def build_server(supervisor: Supervisor) -> MCPServer:
+def build_server(coordinator: Coordinator) -> MCPServer:
     """Build the MCP server and register baton's tools on it.
 
     Args:
-        supervisor: The supervisor every registered tool delegates to.
+        coordinator: The coordinator every registered tool delegates to.
 
     Returns:
         An `MCPServer` named ``"baton"`` with `initialize_project`,
@@ -46,7 +44,7 @@ def build_server(supervisor: Supervisor) -> MCPServer:
         registered.
     """
     server = MCPServer("baton")
-    tools = BatonTools(supervisor)
+    tools = BatonTools(coordinator)
     server.tool()(tools.initialize_project)
     server.tool()(tools.report_status)
     server.tool()(tools.report_lifecycle)
@@ -55,9 +53,9 @@ def build_server(supervisor: Supervisor) -> MCPServer:
 
 
 def build_app(
-    supervisor: Supervisor, server: MCPServer, config: BatonConfig
+    coordinator: Coordinator, server: MCPServer, config: BatonConfig
 ) -> Starlette:
-    """Build the ASGI app that runs the MCP server for the supervisor's life.
+    """Build the ASGI app that runs the MCP server for the coordinator's life.
 
     The MCP server's SSE app is built with `host=config.host`, which keeps
     mcp's DNS-rebinding protection: `sse_app` enables that protection only
@@ -67,41 +65,41 @@ def build_app(
     stays at `/messages/`.
 
     Args:
-        supervisor: The supervisor whose `start` and `shutdown` hooks run
-            around the server's life.
+        coordinator: The coordinator whose `start` and `shutdown` hooks
+            run around the server's life.
         server: The MCP server to mount and serve.
         config: The runtime configuration naming the host `sse_app` binds
             its DNS-rebinding protection to.
 
     Returns:
-        A `Starlette` app whose lifespan reconciles with any worker left
-        over from a previous run and starts the supervisor's pane
-        watchdog before serving, then stops the watchdog and drains
-        pending work after.
+        A `Starlette` app whose lifespan reconciles every project with
+        any worker left over from a previous run and starts the daemon's
+        pane watchdog before serving, then stops the watchdog and drains
+        every project's pending work after.
     """
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
-        """Reconcile, then run the supervisor's watchdog for the serving life.
+        """Reconcile every project, then run the watchdog for the serving life.
 
         Args:
             app: The Starlette app this lifespan is bound to.
 
         Yields:
-            Control, once the supervisor has reconciled with any worker
-            left over from a previous run and its watchdog has started,
-            for as long as the app serves requests.
+            Control, once every project has reconciled with any worker
+            left over from a previous run and the daemon's watchdog has
+            started, for as long as the app serves requests.
 
         Raises:
-            TmuxError: If the reconciliation request cannot be sent to a
+            TmuxError: If a reconciliation request cannot be sent to a
                 live worker's pane. The app never serves, which is the
                 intent: a pane baton cannot type into needs a human.
         """
-        await supervisor.start()
+        await coordinator.start()
         try:
             yield
         finally:
-            await supervisor.shutdown()
+            await coordinator.shutdown()
 
     return Starlette(
         routes=[Mount("/", app=server.sse_app(host=config.host))],

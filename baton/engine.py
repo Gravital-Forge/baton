@@ -7,7 +7,6 @@ it.
 """
 
 import asyncio
-import contextlib
 import logging
 import signal
 import time
@@ -53,10 +52,13 @@ class SupervisorError(Exception):
 class Supervisor:
     """Drives one project's worker lifecycle end to end.
 
-    A `Supervisor` launches a project's first worker, receives its
+    A `Supervisor` launches its project's first worker, receives its
     lifecycle reports, and — on a terminal report — terminates the
     worker and either launches the next one or stops. See "The normal
     loop" in docs/architecture.md for the phases a project moves through.
+    The project it drives is named by the state it is built with:
+    `baton.coordinator` mints that identity and runs the one watchdog
+    that ticks every supervisor.
     """
 
     def __init__(
@@ -65,44 +67,43 @@ class Supervisor:
         store: StateStore,
         tmux: TmuxAdapter,
         launcher: WorkerLauncher,
+        state: ProjectState,
     ) -> None:
-        """Bind the supervisor to its collaborators and load persisted state.
+        """Bind the supervisor to its collaborators and its project's state.
 
         Args:
             config: The runtime configuration governing waits and paths.
-            store: The store the supervisor loads its state from and
-                persists every change to.
+            store: The store the supervisor persists every change to.
             tmux: The adapter used to create sessions and signal panes.
             launcher: The adapter used to launch and configure workers.
+            state: The project's current state, either loaded from the
+                store or newly minted by the coordinator.
         """
         self._config = config
         self._store = store
         self._tmux = tmux
         self._launcher = launcher
-        self._state = store.load()
+        self._state = state
         self._lock = asyncio.Lock()
         self._finish_task: asyncio.Task[None] | None = None
-        self._watchdog_task: asyncio.Task[None] | None = None
         self._reconciliation_deadline: float | None = None
 
     async def initialize(
         self,
         project_path: Path,
         initial_prompt: str,
-        session_name: str | None = None,
         model: str | None = None,
     ) -> ProjectState:
-        """Start a new project by launching its first worker.
+        """Start this project by launching its first worker.
 
         See "The tmux layout" in docs/architecture.md for the session
         layout, and "The lifecycle protocol" for the skill every worker
-        is given.
+        is given. The project's id, title and tmux session name are
+        already on the state the coordinator built this supervisor with.
 
         Args:
             project_path: The project directory to supervise.
             initial_prompt: The prompt the first worker is launched with.
-            session_name: The tmux session to use, or None to derive one
-                from the project directory's name.
             model: The model every worker of this project runs on, or
                 None to use the daemon's configured default (`BATON_MODEL`).
 
@@ -110,27 +111,13 @@ class Supervisor:
             The committed ProjectState, in phase running.
 
         Raises:
-            SupervisorError: If a project is already running, blocked,
-                terminating, recovering, or reconciling; if project_path
-                is not an existing directory; if initial_prompt, a given
-                session_name, or a given model is blank; or if model is
-                None and no default is configured.
+            SupervisorError: If project_path is not an existing directory;
+                if initial_prompt or a given model is blank; or if model
+                is None and no default is configured.
             TmuxError: If checking whether the session exists, creating
                 it, or launching the worker fails.
         """
         async with self._lock:
-            if self._state.phase in (
-                ProjectPhase.running,
-                ProjectPhase.blocked,
-                ProjectPhase.terminating,
-                ProjectPhase.recovering,
-                ProjectPhase.reconciling,
-            ):
-                raise SupervisorError(
-                    f"cannot initialize while the project at "
-                    f"{self._state.project_path} is {self._state.phase.value!r}"
-                )
-
             resolved = project_path.expanduser().resolve()
             if not resolved.is_dir():
                 raise SupervisorError(
@@ -139,10 +126,6 @@ class Supervisor:
             if initial_prompt.strip() == "":
                 raise SupervisorError(
                     f"initial prompt must not be blank, got {initial_prompt!r}"
-                )
-            if session_name is not None and session_name.strip() == "":
-                raise SupervisorError(
-                    f"session name must not be blank, got {session_name!r}"
                 )
             if model is not None and model.strip() == "":
                 raise SupervisorError(f"model must not be blank, got {model!r}")
@@ -153,9 +136,7 @@ class Supervisor:
                     "BATON_MODEL"
                 )
 
-            session = (
-                session_name if session_name is not None else f"baton-{resolved.name}"
-            )
+            session = self._state.session_name
             pane_target = _pane_target(session)
 
             write_mcp_config(self._config)
@@ -165,10 +146,9 @@ class Supervisor:
                 resolved, session, initial_prompt, chosen_model
             )
             self._commit(
-                ProjectState.fresh().updated(
+                self._state.updated(
                     phase=ProjectPhase.running,
                     project_path=resolved,
-                    session_name=session,
                     pane_target=pane_target,
                     worker=record,
                     model=chosen_model,
@@ -319,12 +299,13 @@ class Supervisor:
         """Run one watchdog tick: recover the current worker if its pane vanished.
 
         A vanish is a dead pane found with no terminal report on file: the
-        worker's process ended without ever calling report_lifecycle. This
-        method is the watchdog loop's only production caller, so a
-        recovery launch that fails here is logged and moves the project
-        to failed rather than raised — the loop must keep running for the
-        next tick. Contrast _finish, whose failure is re-raised, because
-        wait_for_finish exists to surface it to whoever awaits it.
+        worker's process ended without ever calling report_lifecycle. The
+        coordinator's watchdog loop is this method's only production
+        caller, so a recovery launch that fails here is logged and moves
+        the project to failed rather than raised — that loop must keep
+        running for the next tick. Contrast _finish, whose failure is
+        re-raised, because wait_for_finish exists to surface it to
+        whoever awaits it.
 
         A live pane is also checked against the reconciliation deadline,
         for a project waiting in phase reconciling.
@@ -357,14 +338,14 @@ class Supervisor:
     async def reconcile(self) -> None:
         """Reconcile with a worker left over from before the daemon started.
 
-        This is the daemon's one-time startup work, run once by start
-        before the watchdog begins. It works under the lock and acts by
-        phase. A project in running, blocked, recovering, or reconciling
-        has a worker whose current lifecycle state baton no longer knows,
-        so its pane is asked to report it. A project in terminating has a
-        finish that never ran to completion, so that finish is resumed. A
-        project in uninitialized, completed, or failed has no worker to
-        reconcile with and is left alone.
+        This is the daemon's one-time startup work, run once by the
+        coordinator's `start` before the watchdog begins. It works under
+        the lock and acts by phase. A project in running, blocked,
+        recovering, or reconciling has a worker whose current lifecycle
+        state baton no longer knows, so its pane is asked to report it. A
+        project in terminating has a finish that never ran to completion,
+        so that finish is resumed. A project in uninitialized, completed,
+        or failed has no worker to reconcile with and is left alone.
 
         Raises:
             TmuxError: If sending the reconciliation request to the pane
@@ -386,46 +367,12 @@ class Supervisor:
             elif self._state.phase == ProjectPhase.terminating:
                 self._resume_finish(worker)
 
-    async def start(self) -> None:
-        """Reconcile with any live worker, then start the background watchdog.
-
-        Raises:
-            TmuxError: If reconcile's reconciliation request fails to
-                send. The daemon does not start in that case.
-        """
-        await self.reconcile()
-        self._watchdog_task = asyncio.create_task(self._watch())
-
-    async def _watch(self) -> None:
-        """Poll the current worker's pane on a fixed interval, forever.
-
-        This is the watchdog loop; it runs until shutdown cancels it. A
-        tick that raises is logged and the loop goes on to the next one.
-        check_worker swallows a failed recovery, but the pane read and the
-        vanish event before it can still fail, and an exception let out
-        here would end the watchdog for the daemon's whole life — leaving
-        every later vanish undetected, with nothing but an unretrieved-task
-        warning to show for it. It would also break shutdown, which awaits
-        this task expecting to suppress a CancelledError and would instead
-        re-raise, never reaching wait_for_finish.
-        """
-        while True:
-            await asyncio.sleep(self._config.poll_interval)
-            try:
-                await self.check_worker()
-            except Exception:  # noqa: BLE001 - a failed tick must not end the loop
-                _log.exception("the watchdog tick failed")
-
     async def shutdown(self) -> None:
-        """Stop the watchdog and drain any finish still pending.
+        """Drain any finish still pending.
 
-        Safe to call whether or not start was ever called, and whether or
-        not a finish is pending.
+        Safe to call whether or not a finish is pending. The coordinator
+        stops the watchdog; a supervisor has none of its own.
         """
-        if self._watchdog_task is not None:
-            self._watchdog_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._watchdog_task
         await self.wait_for_finish()
 
     def _commit(self, new_state: ProjectState, reason: str | None = None) -> None:
@@ -481,6 +428,7 @@ class Supervisor:
             self._tmux.create_session(session=session, start_dir=project_path)
         pane_target = _pane_target(session)
         record = self._launcher.launch(
+            project_id=self._state.project_id,
             project_path=project_path,
             pane_target=pane_target,
             prompt=prompt,

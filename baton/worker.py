@@ -10,6 +10,7 @@ from pathlib import Path
 from baton.config import BatonConfig
 from baton.models import WorkerRecord
 from baton.prompts import WORKER_PREAMBLE
+from baton.state import project_state_dir
 from baton.tmux import TmuxAdapter
 
 _LAUNCH_SCRIPT_TEMPLATE = (
@@ -75,11 +76,19 @@ class WorkerLauncher:
         self._tmux = tmux
 
     def launch(
-        self, project_path: Path, pane_target: str, prompt: str, model: str
+        self,
+        project_id: str,
+        project_path: Path,
+        pane_target: str,
+        prompt: str,
+        model: str,
     ) -> WorkerRecord:
         """Launch a worker into the given pane and return its record.
 
         Args:
+            project_id: The id of the project the worker belongs to. It
+                names the state directory the worker's files are written
+                under, and reaches the worker as ``BATON_PROJECT``.
             project_path: The directory the worker's pane starts in.
             pane_target: The tmux pane to respawn, e.g. `"<session>:worker"`.
             prompt: The task prompt to give the worker.
@@ -89,7 +98,11 @@ class WorkerLauncher:
             The `WorkerRecord` describing the launched worker.
         """
         worker_id = str(uuid.uuid4())
-        worker_dir = self._config.state_dir / "workers" / worker_id
+        worker_dir = (
+            project_state_dir(self._config.state_dir, project_id)
+            / "workers"
+            / worker_id
+        )
         worker_dir.mkdir(parents=True, exist_ok=True)
 
         prompt_path = worker_dir / "prompt.md"
@@ -114,7 +127,7 @@ class WorkerLauncher:
         self._tmux.respawn_pane(
             target=pane_target,
             start_dir=project_path,
-            env={"BATON_WORKER_ID": worker_id},
+            env={"BATON_WORKER_ID": worker_id, "BATON_PROJECT": project_id},
             command=shlex.quote(str(launch_path)),
         )
         pane_info = self._tmux.pane_info(pane_target)

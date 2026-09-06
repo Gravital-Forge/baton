@@ -148,6 +148,8 @@ def _decode_state(raw: Mapping[str, object]) -> ProjectState:
         A ProjectState built from raw, with every type restored.
     """
     return ProjectState(
+        project_id=raw["project_id"],
+        title=raw["title"],
         phase=ProjectPhase(raw["phase"]),
         project_path=_decode_optional_path(raw["project_path"]),
         session_name=raw["session_name"],
@@ -178,24 +180,27 @@ def _decode_event(raw: Mapping[str, object]) -> Event:
 
 
 class StateStore:
-    """Reads and writes baton's persistent state and append-only event log."""
+    """Reads and writes one project's persistent state and event log."""
 
-    def __init__(self, state_dir: Path) -> None:
+    def __init__(self, project_state_dir: Path) -> None:
         """Compute the store's paths without touching the filesystem.
 
         Args:
-            state_dir: The directory holding state.json and events.jsonl.
+            project_state_dir: The project's own state directory, holding
+                its state.json and events.jsonl. A caller composes it with
+                this module's `project_state_dir` function; the store
+                itself knows no project id.
         """
-        self.state_dir = state_dir
-        self.state_path = state_dir / "state.json"
-        self.events_path = state_dir / "events.jsonl"
+        self.project_state_dir = project_state_dir
+        self.state_path = project_state_dir / "state.json"
+        self.events_path = project_state_dir / "events.jsonl"
 
-    def load(self) -> ProjectState:
-        """Load the current project state.
+    def load(self) -> ProjectState | None:
+        """Load the project's persisted state.
 
         Returns:
-            The ProjectState decoded from state_path, or a fresh,
-            uninitialized state when state_path does not exist.
+            The ProjectState decoded from state_path, or None when
+            state_path does not exist.
 
         Raises:
             ValueError: If state.json is not valid JSON, holds a value no
@@ -205,7 +210,7 @@ class StateStore:
             TypeError: If a timestamp in state.json is not a string.
         """
         if not self.state_path.exists():
-            return ProjectState.fresh()
+            return None
         raw = json.loads(self.state_path.read_text(encoding="utf-8"))
         return _decode_state(raw)
 
@@ -220,8 +225,8 @@ class StateStore:
                 temporary file cannot be written or renamed over the
                 target. The previous state.json is left untouched.
         """
-        self.state_dir.mkdir(parents=True, exist_ok=True)
-        temp_path = self.state_dir / "state.json.tmp"
+        self.project_state_dir.mkdir(parents=True, exist_ok=True)
+        temp_path = self.project_state_dir / "state.json.tmp"
         temp_path.write_text(
             json.dumps(state.to_dict(), indent=2) + "\n", encoding="utf-8"
         )
@@ -248,7 +253,7 @@ class StateStore:
             The Event that was appended, timestamped with the current UTC
             time.
         """
-        self.state_dir.mkdir(parents=True, exist_ok=True)
+        self.project_state_dir.mkdir(parents=True, exist_ok=True)
         event = Event(
             timestamp=datetime.now(UTC),
             kind=kind,

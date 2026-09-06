@@ -74,10 +74,14 @@ Baton asks it for one of two outcomes: `success` with a next prompt, or
 Every report you make carries your own worker id, from the `BATON_WORKER_ID`
 environment variable: `report_status` and `report_lifecycle` both take it.
 
-- `initialize_project(project_path, initial_prompt, session_name=None, model=None)` —
-  creates a project and launches its first worker. The setup agent calls this, not you.
+Your project's id is in the `BATON_PROJECT` environment variable. That id is what
+`get_project_status` takes.
+
+- `initialize_project(project_path, title, initial_prompt, session_name=None, model=None)` —
+  creates a project and launches its first worker, and returns the project's id. The
+  setup agent calls this, not you.
 - `report_status(worker_id, message)` — records a milestone.
 - `report_lifecycle(worker_id, state, message=None, next_prompt=None)` — reports
   your lifecycle state. The only call baton acts on.
-- `get_project_status()` — reads back the project's phase, current worker,
+- `get_project_status(project_id)` — reads back a project's phase, current worker,
   model, last lifecycle report, and recent events.
