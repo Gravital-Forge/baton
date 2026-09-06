@@ -35,7 +35,7 @@ The daemon itself is built from smaller modules, each holding one part of its jo
 - **The coordinator** (`baton/coordinator.py`) holds every project's supervisor, keyed by the id it
   minted for it. It resolves a new project's session name, routes each worker's call to the project
   that worker belongs to, reconciles every project at startup, and runs the one watchdog that ticks
-  them all. It is the daemon's single entry point: nothing above it holds a supervisor.
+  them all. It is the daemon's single entry point: nothing above it owns one.
 - **The MCP tool surface** (`baton/tools.py`, `baton/server.py`, `baton/__main__.py`) validates a
   call, delegates to the coordinator, and shapes the reply. It holds no state machine of its own.
   `build_app`, in `baton/server.py`, builds the ASGI application the daemon serves; its lifespan is
@@ -44,11 +44,12 @@ The daemon itself is built from smaller modules, each holding one part of its jo
 ## Project identity
 
 The coordinator mints a project its id when it creates it: eight lowercase hex characters, minted
-again while the id collides with a directory already under `projects/`. That id names the project in
-every tool argument that names one, and it names the project's directory under `projects/`. A worker
-never names its project. Worker ids are UUIDs, so one is unique across every project the daemon
-holds, and the coordinator finds a reporting worker's project by scanning its supervisors for the
-one holding that worker as current.
+again when the id collides with a directory already under `projects/`, and refused when a bounded
+run of attempts all collide. That id names the project in every tool argument that names one, and
+it names the project's directory under `projects/`. A worker never names its project in a report:
+worker ids are UUIDs, so one is unique across every project the daemon holds, and the coordinator
+finds a reporting worker's project by scanning its supervisors for the one holding that worker as
+current.
 
 A title is a display name and carries no other job, so titles need not be unique. It must not be
 blank. It also seeds the project's tmux session name, which is `baton-` followed by the title's
@@ -217,6 +218,11 @@ terminal last report means the worker did report before the daemon stopped, and 
 exactly as it would have, taking its usual route. Any other last report, or none, means the
 worker's outcome is unknown, so baton terminates it with no grace period and recovers, the same as
 a vanish.
+
+`close_project` is the other way into `terminating`, and a daemon that stops between that commit
+and the retirement leaves the project sitting there. What the restart resumes is a finish, not the
+close, so the project comes back unretired whichever route that finish takes. Closing it again
+retires it.
 
 No project's reconciliation failure reaches another, and none reaches the daemon. The pass gathers
 every reconciliation with `return_exceptions=True`, so a raise comes back as a result to act on
