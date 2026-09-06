@@ -111,17 +111,20 @@ class Coordinator:
         Safe to call whether or not start was ever called. Every
         project's shutdown is awaited even when an earlier one raised, so
         one project's failing finish cannot leave later projects
-        undrained.
+        undrained. The supervisor map is read into a list before the
+        drain, so each result still lines up with the project it came
+        from even if the map grows while the drain awaits.
         """
         if self._watchdog_task is not None:
             self._watchdog_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._watchdog_task
+        projects = list(self._supervisors.items())
         results = await asyncio.gather(
-            *(supervisor.shutdown() for supervisor in self._supervisors.values()),
+            *(supervisor.shutdown() for _, supervisor in projects),
             return_exceptions=True,
         )
-        for project_id, result in zip(self._supervisors, results, strict=True):
+        for (project_id, _), result in zip(projects, results, strict=True):
             if isinstance(result, BaseException):
                 _log.error(
                     "draining project %s at shutdown failed",
@@ -278,7 +281,8 @@ class Coordinator:
         slug = _slug(title)
         if slug == "":
             raise CoordinatorError(
-                f"title must hold a letter or a digit to name a session, got {title!r}"
+                f"title must hold an ASCII letter or digit to name a session, "
+                f"got {title!r}"
             )
         if session_name is not None and session_name.strip() == "":
             raise CoordinatorError(

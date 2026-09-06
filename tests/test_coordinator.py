@@ -297,7 +297,7 @@ async def test_a_blank_title_is_refused(
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("title", ["!!!", "---", "***"])
+@pytest.mark.parametrize("title", ["!!!", "---", "***", "проект"])
 async def test_a_title_that_slugs_to_nothing_is_refused(
     config: BatonConfig,
     tmux: FakeTmux,
@@ -305,12 +305,13 @@ async def test_a_title_that_slugs_to_nothing_is_refused(
     project_dir: Path,
     title: str,
 ) -> None:
-    """A title holding no letter or digit is refused before anything is launched."""
+    """A title holding no ASCII letter or digit is refused before any launch."""
     coordinator = Coordinator(config, tmux, launcher)
 
-    with pytest.raises(CoordinatorError):
+    with pytest.raises(CoordinatorError) as excinfo:
         await coordinator.initialize(project_dir, title, "start here")
 
+    assert "title must hold an ASCII letter or digit" in str(excinfo.value)
     assert launcher.launches == []
 
 
