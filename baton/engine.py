@@ -481,9 +481,9 @@ class Supervisor:
 
         The coordinator calls this for a project whose reconciliation
         raised at startup, so that failure is recorded against the
-        project it belongs to and reaches no other. The worker's pane is
-        left alive: it belongs to no project baton will route to any
-        more, and what it holds is what a human needs to read.
+        project it belongs to and reaches no other. The worker is
+        cleared, so no report from it routes anywhere; its pane is left
+        alive, because what it holds is what a human needs to read.
 
         Args:
             reason: Why the project was given up, carried in the phase
