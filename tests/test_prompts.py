@@ -13,6 +13,9 @@ from baton.prompts import RECONCILIATION_REQUEST, WORKER_PREAMBLE, diagnosis_pro
 TOOL_SIGNATURES = [
     "initialize_project(project_path, title, initial_prompt, "
     "session_name=None, model=None)",
+    "list_projects()",
+    "resume_project(project_id, prompt)",
+    "close_project(project_id)",
     "report_status(worker_id, message)",
     "report_lifecycle(worker_id, state, message=None, next_prompt=None)",
     "get_project_status(project_id)",

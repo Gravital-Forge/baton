@@ -193,6 +193,54 @@ class Coordinator:
         self._supervisors[project_id] = supervisor
         return state
 
+    def list_projects(self) -> list[ProjectState]:
+        """List the state of every project the daemon still holds.
+
+        Returns:
+            The snapshot of every project that is not closed, in
+            registration order. A closed project is retired and leaves
+            this list; its state directory stays on disk as the record of
+            what ran, and `supervisor` still finds it by id.
+        """
+        states = (supervisor.snapshot() for supervisor in self._supervisors.values())
+        return [state for state in states if state.phase != ProjectPhase.closed]
+
+    async def resume(self, project_id: str, prompt: str) -> ProjectState:
+        """Launch a fresh worker on a project that has none.
+
+        Args:
+            project_id: The id of the project to carry on.
+            prompt: The task the new worker is launched with.
+
+        Returns:
+            The project's committed ProjectState, in phase running.
+
+        Raises:
+            CoordinatorError: If no project is registered under that id.
+            SupervisorError: If the project still has a worker of its
+                own, or if prompt is blank.
+            TmuxError: If creating the session or launching the worker
+                fails.
+        """
+        return await self.supervisor(project_id).resume(prompt)
+
+    async def close(self, project_id: str) -> ProjectState:
+        """Retire a project, terminating any worker it still has.
+
+        Args:
+            project_id: The id of the project to retire.
+
+        Returns:
+            The project's committed ProjectState, in phase closed.
+
+        Raises:
+            CoordinatorError: If no project is registered under that id.
+            SupervisorError: If the project is finishing with its current
+                worker.
+            TmuxError: If killing the project's session fails.
+        """
+        return await self.supervisor(project_id).close()
+
     def supervisor_for_worker(self, worker_id: str) -> Supervisor:
         """Find the project a reporting worker belongs to.
 

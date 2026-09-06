@@ -30,6 +30,31 @@ def _worker_id(state: ProjectState) -> str | None:
     return None if state.worker is None else state.worker.worker_id
 
 
+def _project_row(state: ProjectState) -> dict[str, object]:
+    """Shape one project's state as a row for list_projects.
+
+    Args:
+        state: The project state to shape.
+
+    Returns:
+        A mapping of the project's id, title, session name, project path
+        as a string, phase, current worker id, model, and the time its
+        state last changed as an ISO-8601 string.
+    """
+    return {
+        "project_id": state.project_id,
+        "title": state.title,
+        "session_name": state.session_name,
+        "project_path": (
+            None if state.project_path is None else str(state.project_path)
+        ),
+        "phase": state.phase.value,
+        "worker_id": _worker_id(state),
+        "model": state.model,
+        "updated_at": state.updated_at.isoformat(),
+    }
+
+
 class BatonTools:
     """The MCP tools, bound to one coordinator.
 
@@ -114,6 +139,88 @@ class BatonTools:
             "worker_id": _worker_id(state),
             "model": state.model,
         }
+
+    async def list_projects(self) -> list[dict[str, object]]:
+        """List every project baton is supervising, one compact row each.
+
+        The setup agent calls this, not a worker. A project you closed is
+        retired and is not listed. Read one project in full, with its
+        recent events, through ``get_project_status``.
+
+        Returns:
+            One row per project, in the order the projects were created.
+            Each carries the project's id, title, tmux session name,
+            project directory, phase, the current worker's id or None,
+            the model its workers run on, and the time its state last
+            changed, as an ISO-8601 string.
+        """
+        return [_project_row(state) for state in self._coordinator.list_projects()]
+
+    async def resume_project(self, project_id: str, prompt: str) -> dict[str, object]:
+        """Carry a stopped project on by launching a fresh worker.
+
+        The setup agent calls this, not a worker. Use it on a project that
+        has stopped — one whose phase is ``completed`` or ``failed``. The
+        project keeps its id, title, tmux session and event log, and the
+        new worker runs on the model the project was created with. A
+        project that still has a worker is refused, and so is one you have
+        closed: closing retires a project for good.
+
+        The prompt is the whole of the new worker's context, exactly as an
+        initial prompt is. That worker remembers nothing of the workers
+        before it, so give it enough that its next action is unambiguous.
+
+        Args:
+            project_id: The id of the project to carry on.
+            prompt: The task the new worker is launched with. It must not
+                be blank.
+
+        Returns:
+            The project's phase and the id of the worker baton now
+            considers current.
+
+        Raises:
+            ToolError: If baton holds no project with that id; if the
+                project has not stopped; if the prompt is blank; or if the
+                tmux command needed to launch the worker fails.
+        """
+        try:
+            state = await self._coordinator.resume(project_id, prompt)
+        except (CoordinatorError, SupervisorError, TmuxError) as exc:
+            raise ToolError(str(exc)) from exc
+        return {"phase": state.phase.value, "worker_id": _worker_id(state)}
+
+    async def close_project(self, project_id: str) -> dict[str, object]:
+        """Retire a project for good, stopping any worker it still has.
+
+        The setup agent calls this, not a worker. Baton gives a running
+        worker the same grace period a terminal report gets, terminates
+        it, kills the project's tmux session, and frees that session name
+        for a new project. The project leaves ``list_projects``; its state
+        directory stays on disk as the record of what ran, and
+        ``get_project_status`` still reads it back. A closed project
+        cannot be resumed.
+
+        A project that is finishing with its current worker is refused.
+        That lasts seconds — call again.
+
+        Args:
+            project_id: The id of the project to retire.
+
+        Returns:
+            The project's phase, which is ``closed``, and its current
+            worker id, which is None.
+
+        Raises:
+            ToolError: If baton holds no project with that id; if the
+                project is finishing with its current worker; or if the
+                tmux command needed to kill its session fails.
+        """
+        try:
+            state = await self._coordinator.close(project_id)
+        except (CoordinatorError, SupervisorError, TmuxError) as exc:
+            raise ToolError(str(exc)) from exc
+        return {"phase": state.phase.value, "worker_id": _worker_id(state)}
 
     async def report_status(self, worker_id: str, message: str) -> dict[str, object]:
         """Record a milestone. Baton takes no action on it.

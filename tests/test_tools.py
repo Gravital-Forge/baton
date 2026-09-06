@@ -522,3 +522,208 @@ async def test_get_project_status_for_an_unknown_project_is_refused(
         await tools.get_project_status(project_id="nosuch")
 
     assert str(excinfo.value) == "no project has the id 'nosuch'"
+
+
+@pytest.mark.anyio
+async def test_list_projects_returns_a_row_per_project(
+    make_stub_coordinator: type[StubCoordinator], tmp_path: Path
+) -> None:
+    """list_projects shapes each project's state into its own compact row."""
+    state = ProjectState.new("a1b2c3d4", "Widget factory").updated(
+        phase=ProjectPhase.running,
+        project_path=tmp_path,
+        session_name="baton-widget-factory",
+        pane_target="baton-widget-factory:worker.0",
+        worker=_worker("worker-1"),
+        model="sonnet",
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    tools = BatonTools(make_stub_coordinator(projects=[state]))
+
+    result = await tools.list_projects()
+
+    assert result == [
+        {
+            "project_id": "a1b2c3d4",
+            "title": "Widget factory",
+            "session_name": "baton-widget-factory",
+            "project_path": str(tmp_path),
+            "phase": "running",
+            "worker_id": "worker-1",
+            "model": "sonnet",
+            "updated_at": "2026-01-01T00:00:00+00:00",
+        }
+    ]
+
+
+@pytest.mark.anyio
+async def test_list_projects_with_no_project_returns_no_row(
+    make_stub_coordinator: type[StubCoordinator],
+) -> None:
+    """list_projects returns no row when baton holds no project."""
+    tools = BatonTools(make_stub_coordinator())
+
+    assert await tools.list_projects() == []
+
+
+@pytest.mark.anyio
+async def test_resume_project_delegates_the_project_id_and_prompt(
+    make_stub_coordinator: type[StubCoordinator],
+) -> None:
+    """resume_project delegates the project id and the prompt."""
+    stub = make_stub_coordinator()
+    tools = BatonTools(stub)
+
+    await tools.resume_project(project_id="a1b2c3d4", prompt="carry on")
+
+    assert stub.resume_calls == [{"project_id": "a1b2c3d4", "prompt": "carry on"}]
+
+
+@pytest.mark.anyio
+async def test_resume_project_returns_phase_and_worker_id_from_the_returned_state(
+    make_stub_coordinator: type[StubCoordinator],
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """resume_project reads its reply from the state the coordinator returned."""
+    state = ProjectState.new("a1b2c3d4", "Widget factory").updated(
+        phase=ProjectPhase.running, worker=_worker("worker-2")
+    )
+    stub = make_stub_coordinator(supervisor=make_stub_supervisor(state=state))
+    tools = BatonTools(stub)
+
+    result = await tools.resume_project(project_id="a1b2c3d4", prompt="carry on")
+
+    assert result == {"phase": "running", "worker_id": "worker-2"}
+
+
+@pytest.mark.anyio
+async def test_resume_project_for_an_unknown_project_is_refused(
+    make_stub_coordinator: type[StubCoordinator],
+) -> None:
+    """resume_project surfaces an unknown project id as an identical ToolError."""
+    stub = make_stub_coordinator(
+        resume_error=CoordinatorError("no project has the id 'nosuch'"),
+    )
+    tools = BatonTools(stub)
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.resume_project(project_id="nosuch", prompt="carry on")
+
+    assert str(excinfo.value) == "no project has the id 'nosuch'"
+
+
+@pytest.mark.anyio
+async def test_resume_project_surfaces_a_supervisor_error_as_a_tool_error(
+    make_stub_coordinator: type[StubCoordinator],
+) -> None:
+    """resume_project surfaces a SupervisorError as an identical ToolError."""
+    stub = make_stub_coordinator(
+        resume_error=SupervisorError(
+            "only a project in phase 'completed' or 'failed' can be resumed, "
+            "got 'running'"
+        ),
+    )
+    tools = BatonTools(stub)
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.resume_project(project_id="a1b2c3d4", prompt="carry on")
+
+    assert str(excinfo.value) == (
+        "only a project in phase 'completed' or 'failed' can be resumed, got 'running'"
+    )
+
+
+@pytest.mark.anyio
+async def test_resume_project_surfaces_a_tmux_error_as_a_tool_error(
+    make_stub_coordinator: type[StubCoordinator],
+) -> None:
+    """resume_project surfaces a TmuxError as an identical ToolError."""
+    stub = make_stub_coordinator(resume_error=TmuxError("no such session"))
+    tools = BatonTools(stub)
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.resume_project(project_id="a1b2c3d4", prompt="carry on")
+
+    assert str(excinfo.value) == "no such session"
+
+
+@pytest.mark.anyio
+async def test_close_project_delegates_the_project_id(
+    make_stub_coordinator: type[StubCoordinator],
+) -> None:
+    """close_project delegates the project id."""
+    stub = make_stub_coordinator()
+    tools = BatonTools(stub)
+
+    await tools.close_project(project_id="a1b2c3d4")
+
+    assert stub.close_calls == ["a1b2c3d4"]
+
+
+@pytest.mark.anyio
+async def test_close_project_returns_phase_and_worker_id_from_the_returned_state(
+    make_stub_coordinator: type[StubCoordinator],
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """close_project reads its reply from the state the coordinator returned."""
+    state = ProjectState.new("a1b2c3d4", "Widget factory").updated(
+        phase=ProjectPhase.closed
+    )
+    stub = make_stub_coordinator(supervisor=make_stub_supervisor(state=state))
+    tools = BatonTools(stub)
+
+    result = await tools.close_project(project_id="a1b2c3d4")
+
+    assert result == {"phase": "closed", "worker_id": None}
+
+
+@pytest.mark.anyio
+async def test_close_project_for_an_unknown_project_is_refused(
+    make_stub_coordinator: type[StubCoordinator],
+) -> None:
+    """close_project surfaces an unknown project id as an identical ToolError."""
+    stub = make_stub_coordinator(
+        close_error=CoordinatorError("no project has the id 'nosuch'"),
+    )
+    tools = BatonTools(stub)
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.close_project(project_id="nosuch")
+
+    assert str(excinfo.value) == "no project has the id 'nosuch'"
+
+
+@pytest.mark.anyio
+async def test_close_project_surfaces_a_supervisor_error_as_a_tool_error(
+    make_stub_coordinator: type[StubCoordinator],
+) -> None:
+    """close_project surfaces a SupervisorError as an identical ToolError."""
+    stub = make_stub_coordinator(
+        close_error=SupervisorError(
+            "the project is in phase 'terminating' and is finishing with its "
+            "current worker; close it again once that finishes"
+        ),
+    )
+    tools = BatonTools(stub)
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.close_project(project_id="a1b2c3d4")
+
+    assert str(excinfo.value) == (
+        "the project is in phase 'terminating' and is finishing with its "
+        "current worker; close it again once that finishes"
+    )
+
+
+@pytest.mark.anyio
+async def test_close_project_surfaces_a_tmux_error_as_a_tool_error(
+    make_stub_coordinator: type[StubCoordinator],
+) -> None:
+    """close_project surfaces a TmuxError as an identical ToolError."""
+    stub = make_stub_coordinator(close_error=TmuxError("kill-session failed"))
+    tools = BatonTools(stub)
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.close_project(project_id="a1b2c3d4")
+
+    assert str(excinfo.value) == "kill-session failed"

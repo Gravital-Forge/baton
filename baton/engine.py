@@ -156,6 +156,101 @@ class Supervisor:
             )
             return self._state
 
+    async def resume(self, prompt: str) -> ProjectState:
+        """Carry a stopped project on with a fresh worker.
+
+        The project keeps its id, title, session name, path, model and
+        event log; only its worker is new. The recovery attempts reset
+        and the last report is cleared, so a stopped worker's outcome is
+        not read back as though it were the new worker's.
+
+        Args:
+            prompt: The task the new worker is launched with.
+
+        Returns:
+            The committed ProjectState, in phase running.
+
+        Raises:
+            SupervisorError: If the project still has a worker of its own
+                — any phase but completed or failed — or if prompt is
+                blank.
+            TmuxError: If creating the session or launching the worker
+                fails.
+        """
+        async with self._lock:
+            phase = self._state.phase
+            if phase not in (ProjectPhase.completed, ProjectPhase.failed):
+                raise SupervisorError(
+                    f"only a project in phase 'completed' or 'failed' can be "
+                    f"resumed, got {phase.value!r}"
+                )
+            if prompt.strip() == "":
+                raise SupervisorError(f"prompt must not be blank, got {prompt!r}")
+
+            record = self._launch_worker(
+                self._state.project_path,
+                self._state.session_name,
+                prompt,
+                self._state.model,
+            )
+            self._commit(
+                self._state.updated(
+                    phase=ProjectPhase.running,
+                    worker=record,
+                    last_report=None,
+                    recovery_attempts=0,
+                )
+            )
+            return self._state
+
+    async def close(self) -> ProjectState:
+        """Retire the project, terminating any worker it still has.
+
+        The lock is held in two stretches, the way _finish holds it, with
+        the grace period and the termination poll between them. A lock
+        held across both would stall the coordinator's watchdog:
+        check_worker takes each supervisor's lock in turn, so blocking
+        here blocks vanish detection for every other project for as long
+        as the two waits take.
+
+        The session kill is guarded by has_session, because an absent
+        session is an ordinary state — a tmux server restart, or an
+        operator who killed it — and kill_session raises on one.
+
+        Returns:
+            The committed ProjectState, in phase closed.
+
+        Raises:
+            SupervisorError: If the project is already terminating, which
+                a finish already under way would commit over the top of.
+                That phase lasts seconds; the caller retries.
+            TmuxError: If killing the project's session fails.
+        """
+        async with self._lock:
+            if self._state.phase == ProjectPhase.terminating:
+                raise SupervisorError(
+                    f"the project is in phase {self._state.phase.value!r} and is "
+                    "finishing with its current worker; close it again once "
+                    "that finishes"
+                )
+            worker = self._state.worker
+            if worker is not None:
+                self._commit(
+                    self._state.updated(phase=ProjectPhase.terminating),
+                    reason="the project was closed",
+                )
+
+        if worker is not None:
+            await asyncio.sleep(self._config.grace_period)
+            await self._terminate(worker)
+
+        async with self._lock:
+            session = self._state.session_name
+            if self._tmux.has_session(session=session):
+                self._tmux.kill_session(session=session)
+            self._commit(self._state.updated(phase=ProjectPhase.closed, worker=None))
+            return self._state
+
     async def record_status(self, worker_id: str, message: str) -> None:
         """Record a non-authoritative progress milestone.
 

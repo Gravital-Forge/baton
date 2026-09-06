@@ -1,5 +1,6 @@
 """Tests for baton.engine."""
 
+import asyncio
 import logging
 import re
 import signal
@@ -2176,3 +2177,350 @@ async def test_shutdown_drains_a_pending_finish(
 async def test_shutdown_with_no_pending_finish_returns(supervisor: Supervisor) -> None:
     """Shutdown with nothing pending returns without error."""
     await supervisor.shutdown()
+
+
+@pytest.mark.anyio
+async def test_resume_launches_a_worker_on_a_completed_project(
+    store: StateStore,
+    supervisor: Supervisor,
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """Resume launches a fresh worker on a project that completed."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.completed, message="all done"
+    )
+    await supervisor.wait_for_finish()
+
+    state = await supervisor.resume("carry on")
+
+    for persisted in _persisted_and_live(store, supervisor):
+        assert persisted.phase == ProjectPhase.running
+        assert persisted.worker.worker_id == "worker-2"
+    assert state.phase == ProjectPhase.running
+    assert launcher.launches[1]["prompt"] == "carry on"
+    assert launcher.launches[1]["pane_target"] == PANE_TARGET
+
+
+@pytest.mark.anyio
+async def test_resume_launches_a_worker_on_a_failed_project(
+    supervisor: Supervisor, launcher: FakeLauncher, project_dir: Path
+) -> None:
+    """Resume launches a fresh worker on a project baton gave up on."""
+    await supervisor.initialize(project_dir, "start here")
+    await supervisor.fail("reconciliation at startup failed")
+
+    state = await supervisor.resume("try again")
+
+    assert state.phase == ProjectPhase.running
+    assert launcher.launches[1]["prompt"] == "try again"
+
+
+@pytest.mark.anyio
+async def test_resume_keeps_the_projects_identity_and_event_log(
+    supervisor: Supervisor, project_dir: Path
+) -> None:
+    """Resume keeps the project's id, title, session name, model and event log."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.completed, message="all done"
+    )
+    await supervisor.wait_for_finish()
+
+    state = await supervisor.resume("carry on")
+
+    assert state.project_id == result.project_id
+    assert state.title == TITLE
+    assert state.session_name == SESSION_NAME
+    assert state.model == result.model
+    assert [event.kind for event in supervisor.recent_events(count=20)] == [
+        EventKind.launch,
+        EventKind.phase,
+        EventKind.lifecycle,
+        EventKind.phase,
+        EventKind.terminate,
+        EventKind.phase,
+        EventKind.launch,
+        EventKind.phase,
+    ]
+
+
+@pytest.mark.anyio
+async def test_resume_clears_the_stopped_workers_report(
+    supervisor: Supervisor, project_dir: Path
+) -> None:
+    """Resume clears the last report, so a stopped worker's outcome is not read back."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.completed, message="all done"
+    )
+    await supervisor.wait_for_finish()
+
+    state = await supervisor.resume("carry on")
+
+    assert state.last_report is None
+
+
+@pytest.mark.anyio
+async def test_resume_resets_the_recovery_attempts(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_id: str,
+    project_dir: Path,
+) -> None:
+    """Resume resets the recovery attempts a failed project accumulated."""
+    supervisor = Supervisor(
+        config=config,
+        store=store,
+        tmux=tmux,
+        launcher=launcher,
+        state=_new_state(project_id).updated(
+            phase=ProjectPhase.failed,
+            project_path=project_dir.resolve(),
+            pane_target=PANE_TARGET,
+            model="sonnet",
+            recovery_attempts=3,
+        ),
+    )
+
+    state = await supervisor.resume("try again")
+
+    assert state.recovery_attempts == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "phase",
+    [
+        ProjectPhase.uninitialized,
+        ProjectPhase.running,
+        ProjectPhase.recovering,
+        ProjectPhase.reconciling,
+        ProjectPhase.blocked,
+        ProjectPhase.terminating,
+        ProjectPhase.closed,
+    ],
+)
+async def test_resume_is_refused_in_every_other_phase(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_id: str,
+    phase: ProjectPhase,
+) -> None:
+    """Resume is refused for a project that is not completed or failed."""
+    supervisor = Supervisor(
+        config=config,
+        store=store,
+        tmux=tmux,
+        launcher=launcher,
+        state=_new_state(project_id).updated(phase=phase),
+    )
+
+    with pytest.raises(SupervisorError) as excinfo:
+        await supervisor.resume("carry on")
+
+    assert phase.value in str(excinfo.value)
+    assert launcher.launches == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("prompt", ["", "  \n\t "])
+async def test_resume_is_refused_for_a_blank_prompt(
+    supervisor: Supervisor, launcher: FakeLauncher, project_dir: Path, prompt: str
+) -> None:
+    """Resume is refused for a blank prompt, before anything is launched."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.completed, message="all done"
+    )
+    await supervisor.wait_for_finish()
+
+    with pytest.raises(SupervisorError, match="prompt must not be blank"):
+        await supervisor.resume(prompt)
+
+    assert len(launcher.launches) == 1
+
+
+@pytest.mark.anyio
+async def test_close_terminates_the_live_worker_and_kills_the_session(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_id: str,
+    project_dir: Path,
+) -> None:
+    """Close terminates the running worker, kills its session, and retires it."""
+    tmux = make_tmux(
+        pane_infos=[PaneInfo(dead=False, pid=999), PaneInfo(dead=True, pid=None)]
+    )
+    supervisor = Supervisor(
+        config=config,
+        store=store,
+        tmux=tmux,
+        launcher=launcher,
+        state=_new_state(project_id),
+    )
+    await supervisor.initialize(project_dir, "start here")
+
+    state = await supervisor.close()
+
+    assert tmux.signals == [(999, signal.SIGTERM)]
+    assert tmux.kill_session_calls == [SESSION_NAME]
+    assert state.phase == ProjectPhase.closed
+    for persisted in _persisted_and_live(store, supervisor):
+        assert persisted.phase == ProjectPhase.closed
+        assert persisted.worker is None
+
+
+@pytest.mark.anyio
+async def test_close_produces_the_retirement_event_sequence_in_order(
+    supervisor: Supervisor, project_dir: Path
+) -> None:
+    """Close produces the pinned event sequence, saying why the worker was stopped."""
+    await supervisor.initialize(project_dir, "start here")
+
+    await supervisor.close()
+
+    events = supervisor.recent_events(count=20)
+    assert [event.kind for event in events] == [
+        EventKind.launch,
+        EventKind.phase,
+        EventKind.phase,
+        EventKind.terminate,
+        EventKind.phase,
+    ]
+    phase_events = [event for event in events if event.kind == EventKind.phase]
+    assert [(event.payload["from"], event.payload["to"]) for event in phase_events] == [
+        (ProjectPhase.uninitialized.value, ProjectPhase.running.value),
+        (ProjectPhase.running.value, ProjectPhase.terminating.value),
+        (ProjectPhase.terminating.value, ProjectPhase.closed.value),
+    ]
+    assert phase_events[1].payload["reason"] == "the project was closed"
+
+
+@pytest.mark.anyio
+async def test_close_waits_the_grace_period_out_before_terminating(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_id: str,
+    project_dir: Path,
+) -> None:
+    """Through the grace period the project is terminating, its worker unsignalled."""
+    config = replace(config, grace_period=60)
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=999)])
+    supervisor = Supervisor(
+        config=config,
+        store=store,
+        tmux=tmux,
+        launcher=launcher,
+        state=_new_state(project_id),
+    )
+    await supervisor.initialize(project_dir, "start here")
+
+    closing = asyncio.create_task(supervisor.close())
+    await asyncio.sleep(0)
+
+    assert supervisor.snapshot().phase == ProjectPhase.terminating
+    assert tmux.signals == []
+
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+
+@pytest.mark.anyio
+async def test_close_holds_no_lock_across_the_grace_period(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_id: str,
+    project_dir: Path,
+) -> None:
+    """A watchdog tick still completes while a close waits out the grace period.
+
+    check_worker takes the same lock the close does. A close holding that
+    lock across the grace period and the termination poll would block
+    vanish detection for every other project for as long as both take, so
+    this call would never return.
+    """
+    config = replace(config, grace_period=60)
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=999)])
+    supervisor = Supervisor(
+        config=config,
+        store=store,
+        tmux=tmux,
+        launcher=launcher,
+        state=_new_state(project_id),
+    )
+    await supervisor.initialize(project_dir, "start here")
+    closing = asyncio.create_task(supervisor.close())
+    await asyncio.sleep(0)
+
+    await asyncio.wait_for(supervisor.check_worker(), timeout=1)
+
+    assert supervisor.snapshot().phase == ProjectPhase.terminating
+
+    closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+
+
+@pytest.mark.anyio
+async def test_close_with_no_worker_signals_nothing_and_retires(
+    supervisor: Supervisor, tmux: FakeTmux, project_dir: Path
+) -> None:
+    """Close on a project with no worker signals nothing and retires it."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.completed, message="all done"
+    )
+    await supervisor.wait_for_finish()
+
+    state = await supervisor.close()
+
+    assert state.phase == ProjectPhase.closed
+    assert tmux.kill_session_calls == [SESSION_NAME]
+    assert tmux.signals == []
+
+
+@pytest.mark.anyio
+async def test_close_kills_nothing_when_the_session_is_already_gone(
+    supervisor: Supervisor, tmux: FakeTmux, project_dir: Path
+) -> None:
+    """Close retires the project though its tmux session is already absent."""
+    await supervisor.initialize(project_dir, "start here")
+    tmux.sessions.discard(SESSION_NAME)
+
+    state = await supervisor.close()
+
+    assert tmux.kill_session_calls == []
+    assert state.phase == ProjectPhase.closed
+
+
+@pytest.mark.anyio
+async def test_close_is_refused_while_the_project_is_terminating(
+    supervisor: Supervisor, project_dir: Path
+) -> None:
+    """Close is refused for a project finishing with its current worker."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.completed, message="all done"
+    )
+
+    with pytest.raises(SupervisorError) as excinfo:
+        await supervisor.close()
+
+    assert ProjectPhase.terminating.value in str(excinfo.value)
+
+    await supervisor.wait_for_finish()
+
+    assert supervisor.snapshot().phase == ProjectPhase.completed

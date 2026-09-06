@@ -717,3 +717,140 @@ async def test_shutdown_without_start_returns(
     coordinator = Coordinator(config, tmux, launcher)
 
     await coordinator.shutdown()
+
+
+def test_list_projects_on_a_daemon_holding_nothing_is_empty(
+    config: BatonConfig, tmux: FakeTmux, launcher: FakeLauncher
+) -> None:
+    """A daemon holding no project lists none."""
+    assert Coordinator(config, tmux, launcher).list_projects() == []
+
+
+@pytest.mark.anyio
+async def test_list_projects_returns_every_project_in_registration_order(
+    config: BatonConfig, tmux: FakeTmux, launcher: FakeLauncher, tmp_path: Path
+) -> None:
+    """list_projects returns each project's state, in the order they were created."""
+    coordinator = Coordinator(config, tmux, launcher)
+    alpha_dir = tmp_path / "alpha"
+    alpha_dir.mkdir()
+    beta_dir = tmp_path / "beta"
+    beta_dir.mkdir()
+
+    alpha = await coordinator.initialize(alpha_dir, "Alpha", "start alpha")
+    beta = await coordinator.initialize(beta_dir, "Beta", "start beta")
+
+    assert [state.project_id for state in coordinator.list_projects()] == [
+        alpha.project_id,
+        beta.project_id,
+    ]
+
+
+@pytest.mark.anyio
+async def test_a_closed_project_leaves_list_projects(
+    config: BatonConfig, tmux: FakeTmux, launcher: FakeLauncher, tmp_path: Path
+) -> None:
+    """A closed project is gone from list_projects, and its sibling stays."""
+    coordinator = Coordinator(config, tmux, launcher)
+    alpha_dir = tmp_path / "alpha"
+    alpha_dir.mkdir()
+    beta_dir = tmp_path / "beta"
+    beta_dir.mkdir()
+    alpha = await coordinator.initialize(alpha_dir, "Alpha", "start alpha")
+    beta = await coordinator.initialize(beta_dir, "Beta", "start beta")
+
+    await coordinator.close(alpha.project_id)
+
+    assert [state.project_id for state in coordinator.list_projects()] == [
+        beta.project_id
+    ]
+
+
+@pytest.mark.anyio
+async def test_a_closed_project_is_still_reachable_by_its_id(
+    config: BatonConfig, tmux: FakeTmux, launcher: FakeLauncher, project_dir: Path
+) -> None:
+    """A closed project stays registered, so its record can still be read."""
+    coordinator = Coordinator(config, tmux, launcher)
+    project = await coordinator.initialize(project_dir, TITLE, "start here")
+
+    await coordinator.close(project.project_id)
+
+    assert coordinator.supervisor(project.project_id).snapshot().phase == (
+        ProjectPhase.closed
+    )
+
+
+@pytest.mark.anyio
+async def test_resume_carries_on_the_named_project(
+    config: BatonConfig, tmux: FakeTmux, launcher: FakeLauncher, project_dir: Path
+) -> None:
+    """Resume launches a fresh worker on the project the id names."""
+    coordinator = Coordinator(config, tmux, launcher)
+    project = await coordinator.initialize(project_dir, TITLE, "start here")
+    supervisor = coordinator.supervisor(project.project_id)
+    await supervisor.report_lifecycle(
+        project.worker.worker_id, LifecycleState.completed, message="all done"
+    )
+    await supervisor.wait_for_finish()
+
+    state = await coordinator.resume(project.project_id, "carry on")
+
+    assert state.phase == ProjectPhase.running
+    assert launcher.launches[-1]["project_id"] == project.project_id
+    assert launcher.launches[-1]["prompt"] == "carry on"
+
+
+@pytest.mark.anyio
+async def test_resume_of_an_unknown_project_is_refused_and_named(
+    config: BatonConfig, tmux: FakeTmux, launcher: FakeLauncher
+) -> None:
+    """Resume of an id no project holds is refused, naming the id."""
+    coordinator = Coordinator(config, tmux, launcher)
+
+    with pytest.raises(CoordinatorError, match=re.escape("'nosuch'")):
+        await coordinator.resume("nosuch", "carry on")
+
+
+@pytest.mark.anyio
+async def test_close_retires_the_named_project(
+    config: BatonConfig, tmux: FakeTmux, launcher: FakeLauncher, project_dir: Path
+) -> None:
+    """Close retires the project the id names, killing its own tmux session."""
+    coordinator = Coordinator(config, tmux, launcher)
+    project = await coordinator.initialize(project_dir, TITLE, "start here")
+
+    state = await coordinator.close(project.project_id)
+
+    assert state.phase == ProjectPhase.closed
+    assert tmux.kill_session_calls == ["baton-widget-factory"]
+
+
+@pytest.mark.anyio
+async def test_close_of_an_unknown_project_is_refused_and_named(
+    config: BatonConfig, tmux: FakeTmux, launcher: FakeLauncher
+) -> None:
+    """Close of an id no project holds is refused, naming the id."""
+    coordinator = Coordinator(config, tmux, launcher)
+
+    with pytest.raises(CoordinatorError, match=re.escape("'nosuch'")):
+        await coordinator.close("nosuch")
+
+
+@pytest.mark.anyio
+async def test_closing_a_project_frees_its_session_name(
+    config: BatonConfig, tmux: FakeTmux, launcher: FakeLauncher, tmp_path: Path
+) -> None:
+    """A new project may take the session name a project it closed had held."""
+    coordinator = Coordinator(config, tmux, launcher)
+    first_dir = tmp_path / "first"
+    first_dir.mkdir()
+    second_dir = tmp_path / "second"
+    second_dir.mkdir()
+    first = await coordinator.initialize(first_dir, TITLE, "start here")
+    await coordinator.close(first.project_id)
+
+    second = await coordinator.initialize(second_dir, TITLE, "start again")
+
+    assert second.session_name == first.session_name
+    assert second.project_id != first.project_id

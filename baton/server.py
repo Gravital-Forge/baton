@@ -39,13 +39,15 @@ def build_server(coordinator: Coordinator) -> MCPServer:
         coordinator: The coordinator every registered tool delegates to.
 
     Returns:
-        An `MCPServer` named ``"baton"`` with `initialize_project`,
-        `report_status`, `report_lifecycle`, and `get_project_status`
-        registered.
+        An `MCPServer` named ``"baton"`` with every `BatonTools` tool
+        method registered on it.
     """
     server = MCPServer("baton")
     tools = BatonTools(coordinator)
     server.tool()(tools.initialize_project)
+    server.tool()(tools.list_projects)
+    server.tool()(tools.resume_project)
+    server.tool()(tools.close_project)
     server.tool()(tools.report_status)
     server.tool()(tools.report_lifecycle)
     server.tool()(tools.get_project_status)

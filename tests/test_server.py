@@ -38,16 +38,19 @@ def test_build_coordinator_refuses_a_legacy_root_state_file(
 
 
 @pytest.mark.anyio
-async def test_build_server_registers_exactly_the_four_tool_names(
+async def test_build_server_registers_exactly_the_seven_tool_names(
     make_stub_coordinator: type[StubCoordinator],
 ) -> None:
-    """build_server registers only the four pinned tool names, no more, no less."""
+    """build_server registers only the seven pinned tool names, no more, no less."""
     server = build_server(make_stub_coordinator())
 
     tools = await server.list_tools()
 
     assert {tool.name for tool in tools} == {
         "initialize_project",
+        "list_projects",
+        "resume_project",
+        "close_project",
         "report_status",
         "report_lifecycle",
         "get_project_status",
@@ -65,6 +68,9 @@ async def test_build_server_uses_each_tools_docstring_as_its_description(
     descriptions = {tool.name: tool.description for tool in tools}
 
     assert descriptions["initialize_project"] == BatonTools.initialize_project.__doc__
+    assert descriptions["list_projects"] == BatonTools.list_projects.__doc__
+    assert descriptions["resume_project"] == BatonTools.resume_project.__doc__
+    assert descriptions["close_project"] == BatonTools.close_project.__doc__
     assert descriptions["report_status"] == BatonTools.report_status.__doc__
     assert descriptions["report_lifecycle"] == BatonTools.report_lifecycle.__doc__
     assert descriptions["get_project_status"] == BatonTools.get_project_status.__doc__

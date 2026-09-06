@@ -390,7 +390,10 @@ class StubCoordinator:
         self,
         *,
         supervisor: StubSupervisor | None = None,
+        projects: Sequence[ProjectState] = (),
         initialize_error: Exception | None = None,
+        resume_error: Exception | None = None,
+        close_error: Exception | None = None,
         lookup_error: CoordinatorError | None = None,
     ) -> None:
         """Store the supervisor to hand back and the errors to raise.
@@ -399,18 +402,30 @@ class StubCoordinator:
             supervisor: The `StubSupervisor` every lookup returns, and
                 whose snapshot `initialize` returns. Defaults to a
                 default `StubSupervisor`.
+            projects: What `list_projects` returns. Defaults to none.
             initialize_error: The error `initialize` raises, when set,
                 instead of recording its call. Widened beyond
                 `CoordinatorError` so a test can script a `TmuxError` or
                 a `SupervisorError`.
+            resume_error: The error `resume` raises, when set, instead of
+                recording its call. Widened beyond `CoordinatorError` so a
+                test can script a `SupervisorError` or a `TmuxError`.
+            close_error: The error `close` raises, when set, instead of
+                recording its call. Widened beyond `CoordinatorError` so a
+                test can script a `SupervisorError` or a `TmuxError`.
             lookup_error: The error `supervisor_for_worker` and
                 `supervisor` raise, when set, instead of handing back the
                 supervisor.
         """
         self._supervisor = StubSupervisor() if supervisor is None else supervisor
+        self._projects = list(projects)
         self._initialize_error = initialize_error
+        self._resume_error = resume_error
+        self._close_error = close_error
         self._lookup_error = lookup_error
         self.initialize_calls: list[dict[str, object]] = []
+        self.resume_calls: list[dict[str, object]] = []
+        self.close_calls: list[str] = []
         self.supervisor_for_worker_calls: list[str] = []
         self.supervisor_calls: list[str] = []
         self.hook_calls: list[str] = []
@@ -449,6 +464,49 @@ class StubCoordinator:
                 "model": model,
             }
         )
+        return self._supervisor.snapshot()
+
+    def list_projects(self) -> list[ProjectState]:
+        """Return the scripted project states.
+
+        Returns:
+            The states given to the constructor, in the order given.
+        """
+        return list(self._projects)
+
+    async def resume(self, project_id: str, prompt: str) -> ProjectState:
+        """Record the call and return the supervisor's state, or raise.
+
+        Args:
+            project_id: The project id passed in.
+            prompt: The prompt passed in.
+
+        Returns:
+            The scripted supervisor's state.
+
+        Raises:
+            Exception: `resume_error`, when one was scripted.
+        """
+        if self._resume_error is not None:
+            raise self._resume_error
+        self.resume_calls.append({"project_id": project_id, "prompt": prompt})
+        return self._supervisor.snapshot()
+
+    async def close(self, project_id: str) -> ProjectState:
+        """Record the call and return the supervisor's state, or raise.
+
+        Args:
+            project_id: The project id passed in.
+
+        Returns:
+            The scripted supervisor's state.
+
+        Raises:
+            Exception: `close_error`, when one was scripted.
+        """
+        if self._close_error is not None:
+            raise self._close_error
+        self.close_calls.append(project_id)
         return self._supervisor.snapshot()
 
     def supervisor_for_worker(self, worker_id: str) -> StubSupervisor:
