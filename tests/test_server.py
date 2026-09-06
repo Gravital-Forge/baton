@@ -121,10 +121,27 @@ async def test_list_projects_answers_two_projects_in_one_content_block(
 
     [block] = result.content
     payload = json.loads(block.text)
-    assert [row["project_id"] for row in payload["projects"]] == [
+    assert {row["project_id"] for row in payload["projects"]} == {
         "a1b2c3d4",
         "e5f6a7b8",
-    ]
+    }
+
+
+@pytest.mark.anyio
+async def test_list_projects_answers_no_project_in_one_content_block(
+    make_stub_coordinator: type[StubCoordinator],
+) -> None:
+    """No project still reaches the caller as one content block.
+
+    A bare empty list is serialized to no content block at all, which a
+    caller cannot tell apart from an answer that never arrived.
+    """
+    server = build_server(make_stub_coordinator())
+
+    result = await server.call_tool("list_projects", {})
+
+    [block] = result.content
+    assert json.loads(block.text) == {"projects": []}
 
 
 @pytest.mark.anyio
