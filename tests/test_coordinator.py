@@ -524,7 +524,7 @@ async def test_start_records_a_reconciliation_failure_against_its_own_project(
     launcher: FakeLauncher,
     project_dir: Path,
 ) -> None:
-    """A project that cannot reconcile is failed, with the exception named."""
+    """A project that cannot reconcile is failed, and its worker left alone."""
     _persist_reconciliation_pair(config, project_dir)
     tmux = make_tmux(
         pane_infos=[PaneInfo(dead=False, pid=1)], send_error=TmuxError("pane is gone")
@@ -535,11 +535,10 @@ async def test_start_records_a_reconciliation_failure_against_its_own_project(
     await coordinator.shutdown()
 
     failed = coordinator.supervisor("aaaa1111")
+    events = failed.recent_events(10)
     assert failed.snapshot().phase == ProjectPhase.failed
-    phase_events = [
-        event for event in failed.recent_events(10) if event.kind == EventKind.phase
-    ]
-    assert "pane is gone" in str(phase_events[-1].payload["reason"])
+    assert [event.kind for event in events] == [EventKind.phase]
+    assert "pane is gone" in str(events[0].payload["reason"])
 
 
 @pytest.mark.anyio

@@ -95,18 +95,17 @@ class Coordinator:
             self._supervisors[project_id] = self._build_supervisor(store, state)
 
     async def start(self) -> None:
-        """Reconcile every project at once, then start the daemon's one watchdog.
+        """Reconcile every project, then start the daemon's one watchdog.
 
         No project's failure reaches another, and none reaches the
         caller. A project whose reconciliation raised is given up,
         recorded as failed in its own event log with the exception named,
         and the daemon goes on to serve every other one.
 
-        Reconciliation runs concurrently because each project waits up to
-        the reconciliation timeout, which a serial pass would multiply by
-        the number of projects. The supervisor map is read into a list
-        before the pass, so each result still lines up with the project it
-        came from.
+        The pass gathers every project so a raise arrives as a result to
+        act on rather than ending the pass at the project that raised.
+        The supervisor map is read into a list before it, so each result
+        still lines up with the project it came from.
         """
         projects = list(self._supervisors.items())
         results = await asyncio.gather(
