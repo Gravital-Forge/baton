@@ -4,7 +4,6 @@ import asyncio
 import logging
 import re
 from collections.abc import Callable
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +14,7 @@ from baton.config import BatonConfig
 from baton.coordinator import Coordinator, CoordinatorError
 from baton.models import (
     EventKind,
+    LifecycleReport,
     LifecycleState,
     ProjectPhase,
     ProjectState,
@@ -52,6 +52,7 @@ def _persist_project(
     phase: ProjectPhase,
     session_name: str,
     worker: WorkerRecord | None = None,
+    last_report: LifecycleReport | None = None,
 ) -> StateStore:
     """Save one project's state under the daemon's state directory.
 
@@ -66,6 +67,8 @@ def _persist_project(
         phase: The phase the persisted state is saved in.
         session_name: The tmux session name the persisted state carries.
         worker: The current worker the persisted state carries, or None.
+        last_report: The most recent lifecycle report the persisted state
+            carries, or None.
 
     Returns:
         The store the state was saved to.
@@ -78,10 +81,48 @@ def _persist_project(
             session_name=session_name,
             pane_target=f"{session_name}:worker.0",
             worker=worker,
+            last_report=last_report,
             model="sonnet",
         )
     )
     return store
+
+
+def _persist_reconciliation_pair(config: BatonConfig, project_dir: Path) -> None:
+    """Persist the two projects a startup isolation test reconciles.
+
+    `FakeTmux` scripts `send_error` for every target at once, so the pair
+    has to differ in the path it takes rather than in the pane it sends
+    to. The first project is running with a live pane, so its
+    reconciliation sends a request and raises. The second is terminating
+    with a terminal success report, so its resumed finish routes to
+    running without ever sending.
+
+    Args:
+        config: The config naming the daemon's state directory.
+        project_dir: The project directory both persisted states point to.
+    """
+    _persist_project(
+        config,
+        "aaaa1111",
+        project_dir,
+        phase=ProjectPhase.running,
+        session_name="baton-one",
+        worker=_worker("worker-1"),
+    )
+    _persist_project(
+        config,
+        "bbbb2222",
+        project_dir,
+        phase=ProjectPhase.terminating,
+        session_name="baton-two",
+        worker=_worker("worker-2"),
+        last_report=LifecycleReport(
+            state=LifecycleState.success,
+            message="phase one done",
+            next_prompt="phase two",
+        ),
+    )
 
 
 def test_construction_refuses_a_legacy_root_state_file(
@@ -477,39 +518,51 @@ async def test_each_project_keeps_its_own_event_log(
 
 
 @pytest.mark.anyio
-async def test_start_propagates_a_reconciliation_failure_and_stops_there(
+async def test_start_records_a_reconciliation_failure_against_its_own_project(
     config: BatonConfig,
     make_tmux: type[FakeTmux],
     launcher: FakeLauncher,
     project_dir: Path,
 ) -> None:
-    """A reconciliation failure for the first project stops the pass there."""
-    config = replace(config, reconciliation_timeout=3600)
-    _persist_project(
-        config,
-        "aaaa1111",
-        project_dir,
-        phase=ProjectPhase.running,
-        session_name="baton-one",
-        worker=_worker("worker-1"),
-    )
-    _persist_project(
-        config,
-        "bbbb2222",
-        project_dir,
-        phase=ProjectPhase.running,
-        session_name="baton-two",
-        worker=_worker("worker-2"),
-    )
+    """A project that cannot reconcile is failed, with the exception named."""
+    _persist_reconciliation_pair(config, project_dir)
     tmux = make_tmux(
         pane_infos=[PaneInfo(dead=False, pid=1)], send_error=TmuxError("pane is gone")
     )
     coordinator = Coordinator(config, tmux, launcher)
 
-    with pytest.raises(TmuxError):
-        await coordinator.start()
+    await coordinator.start()
+    await coordinator.shutdown()
 
-    assert coordinator.supervisor("bbbb2222").snapshot().phase == ProjectPhase.running
+    failed = coordinator.supervisor("aaaa1111")
+    assert failed.snapshot().phase == ProjectPhase.failed
+    phase_events = [
+        event for event in failed.recent_events(10) if event.kind == EventKind.phase
+    ]
+    assert "pane is gone" in str(phase_events[-1].payload["reason"])
+
+
+@pytest.mark.anyio
+async def test_start_serves_a_project_whose_sibling_could_not_reconcile(
+    config: BatonConfig,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_dir: Path,
+) -> None:
+    """A healthy project carries on though its sibling's reconciliation raised."""
+    _persist_reconciliation_pair(config, project_dir)
+    tmux = make_tmux(
+        pane_infos=[PaneInfo(dead=False, pid=1)], send_error=TmuxError("pane is gone")
+    )
+    coordinator = Coordinator(config, tmux, launcher)
+
+    await coordinator.start()
+    healthy = coordinator.supervisor("bbbb2222")
+    await healthy.wait_for_finish()
+    await coordinator.shutdown()
+
+    assert healthy.snapshot().phase == ProjectPhase.running
+    assert launcher.launches[0]["project_id"] == "bbbb2222"
 
 
 @pytest.mark.anyio

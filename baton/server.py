@@ -88,12 +88,9 @@ def build_app(
         Yields:
             Control, once every project has reconciled with any worker
             left over from a previous run and the daemon's watchdog has
-            started, for as long as the app serves requests.
-
-        Raises:
-            TmuxError: If a reconciliation request cannot be sent to a
-                live worker's pane. The app never serves, which is the
-                intent: a pane baton cannot type into needs a human.
+            started, for as long as the app serves requests. A project
+            that could not reconcile is recorded as failed and the app
+            serves the rest.
         """
         await coordinator.start()
         try:

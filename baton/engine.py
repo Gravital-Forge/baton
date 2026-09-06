@@ -349,9 +349,8 @@ class Supervisor:
 
         Raises:
             TmuxError: If sending the reconciliation request to the pane
-                fails. The daemon does not start in that case, which is
-                deliberate: a broken pane needs a human, not a watchdog
-                looping over it.
+                fails. The coordinator records this project as failed and
+                goes on to serve every other one.
         """
         async with self._lock:
             worker = self._state.worker
@@ -366,6 +365,25 @@ class Supervisor:
                 self._request_reconciliation(worker)
             elif self._state.phase == ProjectPhase.terminating:
                 self._resume_finish(worker)
+
+    async def fail(self, reason: str) -> None:
+        """Give the project up, recording why in its own event log.
+
+        The coordinator calls this for a project whose reconciliation
+        raised at startup, so that failure is recorded against the
+        project it belongs to and reaches no other. The worker's pane is
+        left alive: it belongs to no project baton will route to any
+        more, and what it holds is what a human needs to read.
+
+        Args:
+            reason: Why the project was given up, carried in the phase
+                event's payload.
+        """
+        async with self._lock:
+            self._commit(
+                self._state.updated(phase=ProjectPhase.failed, worker=None),
+                reason=reason,
+            )
 
     async def shutdown(self) -> None:
         """Drain any finish still pending.

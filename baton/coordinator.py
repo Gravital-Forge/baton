@@ -95,14 +95,28 @@ class Coordinator:
             self._supervisors[project_id] = self._build_supervisor(store, state)
 
     async def start(self) -> None:
-        """Reconcile every project, then start the daemon's one watchdog.
+        """Reconcile every project at once, then start the daemon's one watchdog.
 
-        Raises:
-            TmuxError: If a project's reconciliation request fails to
-                send. The daemon does not start in that case.
+        No project's failure reaches another, and none reaches the
+        caller. A project whose reconciliation raised is given up,
+        recorded as failed in its own event log with the exception named,
+        and the daemon goes on to serve every other one.
+
+        Reconciliation runs concurrently because each project waits up to
+        the reconciliation timeout, which a serial pass would multiply by
+        the number of projects. The supervisor map is read into a list
+        before the pass, so each result still lines up with the project it
+        came from.
         """
-        for supervisor in self._supervisors.values():
-            await supervisor.reconcile()
+        projects = list(self._supervisors.items())
+        results = await asyncio.gather(
+            *(supervisor.reconcile() for _, supervisor in projects),
+            return_exceptions=True,
+        )
+        for (project_id, supervisor), result in zip(projects, results, strict=True):
+            if isinstance(result, BaseException):
+                _log.error("reconciling project %s failed", project_id, exc_info=result)
+                await supervisor.fail(f"reconciliation at startup failed: {result}")
         self._watchdog_task = asyncio.create_task(self._watch())
 
     async def shutdown(self) -> None:
