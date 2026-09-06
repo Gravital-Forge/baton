@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 4
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -61,20 +61,6 @@ dev = [
     { name = "coverage" },
     { name = "pytest" },
     { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "mcp", extras = ["cli"], specifier = ">=2.0.0,<3" },
-    { name = "starlette", specifier = ">=1.6.0,<2.0.0" },
-    { name = "uvicorn", specifier = ">=0.52.4,<0.53.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "coverage", specifier = ">=7.15.1,<8.0.0" },
-    { name = "pytest", specifier = ">=9.1.1,<10.0.0" },
-    { name = "ruff", specifier = ">=0.15.22,<0.16.0" },
 ]
 
 [[package]]
