@@ -220,10 +220,10 @@ worker's outcome is unknown, so baton terminates it with no grace period and rec
 a vanish.
 
 `close_project` is the other way into `terminating`, and a daemon that stops between that commit
-and the retirement leaves the project sitting there. `close` clears the last report when it commits
-that phase, so the finish a restart resumes is the abnormal one: baton diagnoses the project
-rather than relaunching it on the previous handoff's next prompt. What the restart resumes is a
-finish, not the close, so the project comes back unretired. Closing it again retires it.
+and the retirement leaves the project sitting there. What the restart resumes is a finish, not the
+close, so the project comes back unretired. `close` clears the last report when it commits that
+phase, so that finish is the abnormal one: baton diagnoses the project rather than relaunching it
+on the previous handoff's next prompt. Closing it again retires it.
 
 No project's reconciliation failure reaches another, and none reaches the daemon. The pass gathers
 every reconciliation with `return_exceptions=True`, so a raise comes back as a result to act on
