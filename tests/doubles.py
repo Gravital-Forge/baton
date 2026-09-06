@@ -31,6 +31,7 @@ class FakeTmux:
         sessions: Sequence[str] = (),
         pane_infos: Sequence[PaneInfo] = (),
         create_error: Exception | None = None,
+        kill_session_errors: Sequence[Exception | None] = (),
         pane_info_error: Exception | None = None,
         signal_errors: Sequence[Exception | None] = (),
         send_error: Exception | None = None,
@@ -44,6 +45,9 @@ class FakeTmux:
                 scripted, `pane_info` returns a dead pane with no pid.
             create_error: The exception `create_session` raises, when set,
                 instead of recording the call.
+            kill_session_errors: What `kill_session` raises on each call,
+                in call order, where `None` is a kill that lands. The last
+                entry repeats once they run out.
             pane_info_error: The exception `pane_info` raises, when set,
                 instead of recording the call and returning a reading.
             signal_errors: What `signal_pane` raises on each call, in call
@@ -55,6 +59,7 @@ class FakeTmux:
         self.sessions: set[str] = set(sessions)
         self._pane_infos = list(pane_infos)
         self._create_error = create_error
+        self._kill_session_errors = list(kill_session_errors)
         self._pane_info_error = pane_info_error
         self._signal_errors = list(signal_errors)
         self._send_error = send_error
@@ -94,12 +99,24 @@ class FakeTmux:
         self.sessions.add(session)
 
     def kill_session(self, session: str) -> None:
-        """Record the call and drop the session from the existing set.
+        """Record the call, then raise this call's scripted error, if any.
 
         Args:
-            session: The name of the session that was killed.
+            session: The name of the session to kill.
+
+        Raises:
+            Exception: The error scripted for this call, when one was. The
+                session stays in the existing set, the way a kill that
+                failed leaves it alive.
         """
         self.kill_session_calls.append(session)
+        if self._kill_session_errors:
+            index = min(
+                len(self.kill_session_calls) - 1, len(self._kill_session_errors) - 1
+            )
+            error = self._kill_session_errors[index]
+            if error is not None:
+                raise error
         self.sessions.discard(session)
 
     def respawn_pane(

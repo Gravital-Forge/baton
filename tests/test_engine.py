@@ -2524,3 +2524,66 @@ async def test_close_is_refused_while_the_project_is_terminating(
     await supervisor.wait_for_finish()
 
     assert supervisor.snapshot().phase == ProjectPhase.completed
+
+
+@pytest.mark.anyio
+async def test_a_close_whose_session_kill_fails_leaves_the_project_failed(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_id: str,
+    project_dir: Path,
+) -> None:
+    """A close that cannot kill the session gives the project up rather than wedge it.
+
+    A project left in terminating refuses every later close, every report
+    and every resume, and the watchdog skips that phase, so nothing would
+    move it until the daemon restarted.
+    """
+    tmux = make_tmux(kill_session_errors=[TmuxError("server gone")])
+    supervisor = Supervisor(
+        config=config,
+        store=store,
+        tmux=tmux,
+        launcher=launcher,
+        state=_new_state(project_id),
+    )
+    await supervisor.initialize(project_dir, "start here")
+
+    with pytest.raises(TmuxError):
+        await supervisor.close()
+
+    for persisted in _persisted_and_live(store, supervisor):
+        assert persisted.phase == ProjectPhase.failed
+        assert persisted.worker is None
+    reason = supervisor.recent_events(count=20)[-1].payload["reason"]
+    assert "server gone" in str(reason)
+
+
+@pytest.mark.anyio
+async def test_a_project_a_failed_close_gave_up_can_be_closed_again(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_id: str,
+    project_dir: Path,
+) -> None:
+    """A close that failed can be run again, and retires the project."""
+    tmux = make_tmux(kill_session_errors=[TmuxError("server gone"), None])
+    supervisor = Supervisor(
+        config=config,
+        store=store,
+        tmux=tmux,
+        launcher=launcher,
+        state=_new_state(project_id),
+    )
+    await supervisor.initialize(project_dir, "start here")
+    with pytest.raises(TmuxError):
+        await supervisor.close()
+
+    state = await supervisor.close()
+
+    assert state.phase == ProjectPhase.closed
+    assert tmux.kill_session_calls == [SESSION_NAME, SESSION_NAME]

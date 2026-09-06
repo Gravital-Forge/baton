@@ -217,8 +217,9 @@ class Coordinator:
 
         Raises:
             CoordinatorError: If no project is registered under that id.
-            SupervisorError: If the project still has a worker of its
-                own, or if prompt is blank.
+            SupervisorError: If the project is in any phase but completed
+                or failed — it still has a worker of its own, or it has
+                been closed — or if prompt is blank.
             TmuxError: If creating the session or launching the worker
                 fails.
         """

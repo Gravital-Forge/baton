@@ -206,16 +206,12 @@ class Supervisor:
     async def close(self) -> ProjectState:
         """Retire the project, terminating any worker it still has.
 
-        The lock is held in two stretches, the way _finish holds it, with
-        the grace period and the termination poll between them. A lock
-        held across both would stall the coordinator's watchdog:
+        The lock is held in two stretches, the way the finish path holds
+        it, with the grace period and the termination poll between them.
+        A lock held across both would stall the coordinator's watchdog:
         check_worker takes each supervisor's lock in turn, so blocking
         here blocks vanish detection for every other project for as long
         as the two waits take.
-
-        The session kill is guarded by has_session, because an absent
-        session is an ordinary state — a tmux server restart, or an
-        operator who killed it — and kill_session raises on one.
 
         Returns:
             The committed ProjectState, in phase closed.
@@ -224,7 +220,10 @@ class Supervisor:
             SupervisorError: If the project is already terminating, which
                 a finish already under way would commit over the top of.
                 That phase lasts seconds; the caller retries.
-            TmuxError: If killing the project's session fails.
+            TmuxError: If killing the project's session fails. A worker
+                terminated before that failure leaves the project failed
+                rather than terminating, so a later close can still
+                retire it.
         """
         async with self._lock:
             if self._state.phase == ProjectPhase.terminating:
@@ -234,22 +233,31 @@ class Supervisor:
                     "that finishes"
                 )
             worker = self._state.worker
-            if worker is not None:
-                self._commit(
-                    self._state.updated(phase=ProjectPhase.terminating),
-                    reason="the project was closed",
-                )
+            if worker is None:
+                return self._retire()
+            self._commit(
+                self._state.updated(phase=ProjectPhase.terminating),
+                reason="the project was closed",
+            )
 
-        if worker is not None:
+        try:
             await asyncio.sleep(self._config.grace_period)
             await self._terminate(worker)
-
-        async with self._lock:
-            session = self._state.session_name
-            if self._tmux.has_session(session=session):
-                self._tmux.kill_session(session=session)
-            self._commit(self._state.updated(phase=ProjectPhase.closed, worker=None))
-            return self._state
+            async with self._lock:
+                return self._retire()
+        except Exception as exc:
+            _log.exception("retiring the project failed")
+            # The project must not be left in terminating: that phase
+            # refuses every later close, every report and every resume,
+            # and check_worker skips it, so nothing would move the project
+            # until the daemon restarted. failed is a phase a later close
+            # can retire.
+            async with self._lock:
+                self._commit(
+                    self._state.updated(phase=ProjectPhase.failed, worker=None),
+                    reason=f"retiring the project failed: {exc}",
+                )
+            raise
 
     async def record_status(self, worker_id: str, message: str) -> None:
         """Record a non-authoritative progress milestone.
@@ -553,6 +561,26 @@ class Supervisor:
             {"prompt_path": str(record.prompt_path), "pane_target": pane_target},
         )
         return record
+
+    def _retire(self) -> ProjectState:
+        """Kill the project's tmux session, if it has one, and commit closed.
+
+        Called with the lock held. The session kill is guarded by
+        has_session, because an absent session is an ordinary state — a
+        tmux server restart, or an operator who killed it — and
+        kill_session raises on one.
+
+        Returns:
+            The committed ProjectState, in phase closed.
+
+        Raises:
+            TmuxError: If killing the session fails.
+        """
+        session = self._state.session_name
+        if self._tmux.has_session(session=session):
+            self._tmux.kill_session(session=session)
+        self._commit(self._state.updated(phase=ProjectPhase.closed, worker=None))
+        return self._state
 
     def _require_current_worker(self, worker_id: str) -> None:
         """Refuse a call from a worker that is not the current one.

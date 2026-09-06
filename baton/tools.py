@@ -148,11 +148,11 @@ class BatonTools:
         recent events, through ``get_project_status``.
 
         Returns:
-            One row per project, in the order the projects were created.
-            Each carries the project's id, title, tmux session name,
-            project directory, phase, the current worker's id or None,
-            the model its workers run on, and the time its state last
-            changed, as an ISO-8601 string.
+            One row per project, in no meaningful order. Each carries the
+            project's id, title, tmux session name, project directory,
+            phase, the current worker's id or None, the model its workers
+            run on, and the time its state last changed, as an ISO-8601
+            string.
         """
         return [_project_row(state) for state in self._coordinator.list_projects()]
 
@@ -214,7 +214,9 @@ class BatonTools:
         Raises:
             ToolError: If baton holds no project with that id; if the
                 project is finishing with its current worker; or if the
-                tmux command needed to kill its session fails.
+                tmux command needed to kill its session fails. A worker
+                stopped before such a failure leaves the project
+                ``failed`` and not retired, so call again to retire it.
         """
         try:
             state = await self._coordinator.close(project_id)
