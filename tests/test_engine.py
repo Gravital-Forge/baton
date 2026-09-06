@@ -2587,3 +2587,57 @@ async def test_a_project_a_failed_close_gave_up_can_be_closed_again(
 
     assert state.phase == ProjectPhase.closed
     assert tmux.kill_session_calls == [SESSION_NAME, SESSION_NAME]
+
+
+@pytest.mark.anyio
+async def test_a_close_interrupted_by_a_restart_resumes_as_an_abnormal_finish(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    make_launcher: Callable[..., FakeLauncher],
+    project_id: str,
+    project_dir: Path,
+) -> None:
+    """A close cut short by a restart diagnoses the project, never relaunching it.
+
+    The worker being closed was launched by a success handoff, so the
+    previous worker's terminal report is still the last one on file. A
+    restart that resumed that report would route it a second time and
+    relaunch the project the operator was retiring.
+    """
+    handoff = LifecycleReport(
+        state=LifecycleState.success, message="done", next_prompt="do the next thing"
+    )
+    _persist_project(
+        store,
+        project_id,
+        project_dir,
+        phase=ProjectPhase.running,
+        last_report=handoff,
+    )
+    closing = _persisted_supervisor(
+        replace(config, grace_period=60),
+        store,
+        make_tmux(pane_infos=[PaneInfo(dead=False, pid=999)]),
+        make_launcher(),
+    )
+    close_task = asyncio.create_task(closing.close())
+    await asyncio.sleep(0)
+    close_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await close_task
+
+    launcher = make_launcher()
+    restarted = _persisted_supervisor(
+        config, store, make_tmux(pane_infos=[PaneInfo(dead=False, pid=999)]), launcher
+    )
+
+    await restarted.reconcile()
+    await restarted.wait_for_finish()
+
+    assert len(launcher.launches) == 1
+    assert (
+        "the daemon restarted while terminating the worker"
+        in launcher.launches[0]["prompt"]
+    )
+    assert restarted.snapshot().phase == ProjectPhase.recovering

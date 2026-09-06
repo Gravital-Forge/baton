@@ -213,6 +213,12 @@ class Supervisor:
         here blocks vanish detection for every other project for as long
         as the two waits take.
 
+        The terminating commit clears last_report for the reason the
+        reconciliation timeout does: a terminal report left over from
+        the previous worker's handoff would otherwise be resumed as a
+        finish at the next startup, relaunching a project the operator
+        had retired.
+
         Returns:
             The committed ProjectState, in phase closed.
 
@@ -236,7 +242,7 @@ class Supervisor:
             if worker is None:
                 return self._retire()
             self._commit(
-                self._state.updated(phase=ProjectPhase.terminating),
+                self._state.updated(phase=ProjectPhase.terminating, last_report=None),
                 reason="the project was closed",
             )
 
