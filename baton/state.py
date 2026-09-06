@@ -16,6 +16,67 @@ from baton.models import (
 )
 
 
+def _projects_dir(state_dir: Path) -> Path:
+    """Compose the directory every project's own state directory sits under.
+
+    Args:
+        state_dir: The daemon's state directory.
+
+    Returns:
+        The path `<state_dir>/projects`.
+    """
+    return state_dir / "projects"
+
+
+def project_state_dir(state_dir: Path, project_id: str) -> Path:
+    """Compose the directory holding one project's state and event log.
+
+    Args:
+        state_dir: The daemon's state directory.
+        project_id: The id of the project.
+
+    Returns:
+        The path `<state_dir>/projects/<project_id>`. Nothing is created.
+    """
+    return _projects_dir(state_dir) / project_id
+
+
+def list_project_ids(state_dir: Path) -> list[str]:
+    """List the id of every project persisted under the state directory.
+
+    Args:
+        state_dir: The daemon's state directory.
+
+    Returns:
+        The sorted ids of the directories under `projects/` that hold a
+        state.json, or an empty list when `projects/` is absent. A
+        directory with no state.json is not a project baton wrote.
+    """
+    projects_dir = _projects_dir(state_dir)
+    if not projects_dir.is_dir():
+        return []
+    return sorted(
+        entry.name
+        for entry in projects_dir.iterdir()
+        if entry.is_dir() and (entry / "state.json").exists()
+    )
+
+
+def legacy_state_path(state_dir: Path) -> Path | None:
+    """Find the single-project layout's state file at the state directory root.
+
+    Args:
+        state_dir: The daemon's state directory.
+
+    Returns:
+        The path `<state_dir>/state.json` when it exists, or None. The
+        file is never read: its shape is by definition the one baton no
+        longer writes.
+    """
+    path = state_dir / "state.json"
+    return path if path.exists() else None
+
+
 def _decode_optional_path(value: object) -> Path | None:
     """Decode a JSON value into an optional Path.
 

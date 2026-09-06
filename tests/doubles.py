@@ -58,6 +58,7 @@ class FakeTmux:
         self._send_error = send_error
         self.has_session_calls: list[str] = []
         self.created: list[dict[str, object]] = []
+        self.kill_session_calls: list[str] = []
         self.respawn_calls: list[dict[str, object]] = []
         self.pane_info_calls: list[str] = []
         self.signals: list[tuple[int, int]] = []
@@ -89,6 +90,15 @@ class FakeTmux:
             raise self._create_error
         self.created.append({"session": session, "start_dir": start_dir})
         self.sessions.add(session)
+
+    def kill_session(self, session: str) -> None:
+        """Record the call and drop the session from the existing set.
+
+        Args:
+            session: The name of the session that was killed.
+        """
+        self.kill_session_calls.append(session)
+        self.sessions.discard(session)
 
     def respawn_pane(
         self, target: str, start_dir: Path, env: Mapping[str, str], command: str

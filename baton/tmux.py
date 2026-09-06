@@ -142,6 +142,19 @@ class TmuxAdapter:
             ]
         )
 
+    def kill_session(self, session: str) -> None:
+        """Kill a session and every pane in it.
+
+        Args:
+            session: The name of the session to kill.
+
+        Raises:
+            TmuxError: If the `kill-session` call exits non-zero, which
+                includes the session already being absent. Callers guard
+                with `has_session`.
+        """
+        self._run_checked([self._tmux, "kill-session", "-t", _exact_target(session)])
+
     def respawn_pane(
         self,
         target: str,

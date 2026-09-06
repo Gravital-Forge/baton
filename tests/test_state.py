@@ -15,7 +15,12 @@ from baton.models import (
     ProjectState,
     WorkerRecord,
 )
-from baton.state import StateStore
+from baton.state import (
+    StateStore,
+    legacy_state_path,
+    list_project_ids,
+    project_state_dir,
+)
 
 GOOD_STATE_JSON = {
     "phase": "running",
@@ -432,3 +437,123 @@ def test_every_event_kind_round_trips(store: StateStore, kind: EventKind) -> Non
     recent = store.recent_events(1)
 
     assert recent[0].kind == kind
+
+
+def _write_project_state(state_dir: Path, project_id: str) -> Path:
+    """Create a project directory under the state directory, with a state.json.
+
+    Args:
+        state_dir: The state directory to create the project under.
+        project_id: The id naming the project's directory.
+
+    Returns:
+        The created project directory.
+    """
+    persisted = state_dir / "projects" / project_id
+    persisted.mkdir(parents=True)
+    (persisted / "state.json").write_text("{}", encoding="utf-8")
+    return persisted
+
+
+def test_project_state_dir_composes_projects_and_id(tmp_path: Path) -> None:
+    """project_state_dir composes <state dir>/projects/<project id>."""
+    state_dir = tmp_path / "state"
+
+    composed = project_state_dir(state_dir, "a1b2c3d4")
+
+    assert composed == state_dir / "projects" / "a1b2c3d4"
+
+
+def test_project_state_dir_does_not_touch_the_filesystem(tmp_path: Path) -> None:
+    """project_state_dir composes a path without creating any directory."""
+    state_dir = tmp_path / "state"
+
+    composed = project_state_dir(state_dir, "a1b2c3d4")
+
+    assert not composed.exists()
+    assert not state_dir.exists()
+
+
+def test_list_project_ids_returns_every_persisted_id_sorted(tmp_path: Path) -> None:
+    """list_project_ids returns the ids under projects/, sorted."""
+    state_dir = tmp_path / "state"
+    _write_project_state(state_dir, "c3d4e5f6")
+    _write_project_state(state_dir, "a1b2c3d4")
+    _write_project_state(state_dir, "b2c3d4e5")
+
+    assert list_project_ids(state_dir) == ["a1b2c3d4", "b2c3d4e5", "c3d4e5f6"]
+
+
+def test_list_project_ids_skips_a_directory_without_a_state_file(
+    tmp_path: Path,
+) -> None:
+    """A directory under projects/ with no state.json is not a project."""
+    state_dir = tmp_path / "state"
+    _write_project_state(state_dir, "a1b2c3d4")
+    (state_dir / "projects" / "halfbuilt").mkdir()
+
+    assert list_project_ids(state_dir) == ["a1b2c3d4"]
+
+
+def test_list_project_ids_skips_a_file_beside_the_project_directories(
+    tmp_path: Path,
+) -> None:
+    """A plain file under projects/ is not a project."""
+    state_dir = tmp_path / "state"
+    _write_project_state(state_dir, "a1b2c3d4")
+    (state_dir / "projects" / "stray.txt").write_text("x", encoding="utf-8")
+
+    assert list_project_ids(state_dir) == ["a1b2c3d4"]
+
+
+def test_list_project_ids_on_a_missing_projects_directory_returns_empty(
+    tmp_path: Path,
+) -> None:
+    """list_project_ids returns [] when projects/ does not exist."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    assert list_project_ids(state_dir) == []
+
+
+def test_list_project_ids_on_a_missing_state_directory_returns_empty(
+    tmp_path: Path,
+) -> None:
+    """list_project_ids returns [] when the state directory itself is absent."""
+    assert list_project_ids(tmp_path / "state") == []
+
+
+def test_legacy_state_path_finds_a_root_level_state_file(tmp_path: Path) -> None:
+    """legacy_state_path returns the root state.json when one exists."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    legacy = state_dir / "state.json"
+    legacy.write_text("{}", encoding="utf-8")
+
+    assert legacy_state_path(state_dir) == legacy
+
+
+def test_legacy_state_path_returns_none_when_there_is_none(tmp_path: Path) -> None:
+    """legacy_state_path returns None when the root holds no state.json."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    assert legacy_state_path(state_dir) is None
+
+
+def test_legacy_state_path_ignores_a_project_state_file(tmp_path: Path) -> None:
+    """A state.json under projects/ is the current layout, not a legacy one."""
+    state_dir = tmp_path / "state"
+    _write_project_state(state_dir, "a1b2c3d4")
+
+    assert legacy_state_path(state_dir) is None
+
+
+def test_legacy_state_path_does_not_parse_the_file(tmp_path: Path) -> None:
+    """legacy_state_path reports the path of a file it cannot decode."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    legacy = state_dir / "state.json"
+    legacy.write_text("not json at all", encoding="utf-8")
+
+    assert legacy_state_path(state_dir) == legacy

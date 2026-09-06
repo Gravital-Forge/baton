@@ -83,6 +83,7 @@ def test_lifecycle_state_members_spell_their_value(
         (ProjectPhase.terminating, "terminating"),
         (ProjectPhase.completed, "completed"),
         (ProjectPhase.failed, "failed"),
+        (ProjectPhase.closed, "closed"),
     ],
 )
 def test_project_phase_members_spell_their_value(

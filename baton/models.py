@@ -33,6 +33,7 @@ class ProjectPhase(StrEnum):
     terminating = "terminating"
     completed = "completed"
     failed = "failed"
+    closed = "closed"
 
 
 class EventKind(StrEnum):
