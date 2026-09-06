@@ -158,6 +158,13 @@ class Coordinator:
         The project is registered only once its first worker is running,
         so an initialization that raised leaves no project behind.
 
+        Resolving the session name, minting the id, launching, and
+        registering run with no suspension point between them, so two
+        concurrent initializations cannot both claim one session name.
+        That rests on `Supervisor.initialize` never awaiting anything that
+        suspends: an `await` added inside it opens a check-then-create
+        window here.
+
         Args:
             project_path: The project directory to supervise.
             title: The project's display name. It must not be blank, and

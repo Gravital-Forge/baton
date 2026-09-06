@@ -93,9 +93,10 @@ refused for the message alone:
 
 `success`, `completed`, and `failed` are terminal, and a terminal report is final: it moves the
 project to phase `terminating`. Baton refuses every report from the current worker while the
-project stays there. A terminal report is not the only way in: a live worker whose reconciliation
+project stays there. A terminal report is not the only way in. A live worker whose reconciliation
 deadline passes unanswered reaches `terminating` with no report at all (see "Restart
-reconciliation"), and baton refuses its next report just the same.
+reconciliation"), and baton refuses its next report just the same. `close_project` reaches the
+phase too, when an operator retires the project (see "Resuming and retiring").
 
 A worker meets these rules twice. `baton/skill/SKILL.md` is the protocol it follows for the whole
 session, and the launcher installs it in the project at `.claude/skills/baton-worker/SKILL.md`. The
@@ -178,9 +179,10 @@ The watchdog detects a vanish. On each tick, `check_worker` reads the current wo
 pane found with a current worker, outside phase `terminating`, is a worker that ended without a
 terminal report. Baton appends a `vanish` event and starts recovery.
 
-A `failed` lifecycle report, a vanished pane, and a worker baton gives up on after a restart (see
-"Restart reconciliation") all reach the same recovery: baton launches a diagnosis worker into the
-project's pane and moves the project to phase `recovering`, counting the attempt.
+A `failed` lifecycle report, a vanished pane, and a worker that lets its reconciliation deadline
+pass unanswered after a restart (see "Restart reconciliation") all reach the same recovery: baton
+launches a diagnosis worker into the project's pane and moves the project to phase `recovering`,
+counting the attempt.
 
 The diagnosis worker's prompt, built by `diagnosis_prompt` in `baton/prompts.py`, tells it what
 happened and the reason baton recorded, and where to look: the previous worker's prompt file, the
@@ -219,7 +221,7 @@ exactly as it would have, taking its usual route. Any other last report, or none
 worker's outcome is unknown, so baton terminates it with no grace period and recovers, the same as
 a vanish.
 
-`close_project` is the other way into `terminating`, and a daemon that stops between that commit
+`close_project` is another way into `terminating`, and a daemon that stops between that commit
 and the retirement leaves the project sitting there. What the restart resumes is a finish, not the
 close, so the project comes back unretired. `close` clears the last report when it commits that
 phase, so that finish is the abnormal one: baton diagnoses the project rather than relaunching it
@@ -232,10 +234,11 @@ is for, not overlapping the projects' waiting: nothing in `reconcile` waits for 
 The watchdog does that, and it starts once the pass is over.
 
 A project whose reconciliation raised is given up. `Supervisor.fail` commits phase `failed` with the
-exception named in the phase event's reason, and the daemon goes on to serve every other project.
-That project's pane is left alive: it belongs to no project baton will route to any more, and what
-it holds is what a human needs to read. `resume_project` respawns it with a fresh worker once they
-have.
+exception named in the phase event's reason, and clears the current worker. The daemon goes on to
+serve every other project. That project's pane is left alive, and what it holds is what a human
+needs to read. What baton stops routing to is the worker: `supervisor_for_worker` no longer finds
+it, so a late report from it reaches nothing. `resume_project` respawns the pane with a fresh worker
+once the human has read it.
 
 Every report from `reconciling` routes as any lifecycle report does. A `running` report returns the
 project to phase `running`. A `blocked` report moves it to phase `blocked`. Each terminal report —

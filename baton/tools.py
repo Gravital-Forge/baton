@@ -90,11 +90,11 @@ class BatonTools:
         The title is a display name and need not be unique. It also names the
         tmux session, as ``baton-`` followed by the title's slug: the title
         lowercased, with every run of characters outside ``a-z0-9`` replaced
-        by a single ``-``. The call is refused when that session name is
-        already held by one of baton's projects, or already exists in tmux;
-        pass ``session_name`` to use another. The title and the initial
-        prompt must not be blank, and neither may a session name when you
-        give one.
+        by a single ``-``, and leading and trailing ``-`` stripped. The call
+        is refused when that session name is already held by one of baton's
+        projects, or already exists in tmux; pass ``session_name`` to use
+        another. The title and the initial prompt must not be blank, and
+        neither may a session name when you give one.
 
         Every worker of this project runs on one explicitly chosen model:
         the ``model`` argument, else the daemon's ``BATON_MODEL``. The call

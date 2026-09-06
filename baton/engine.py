@@ -454,7 +454,8 @@ class Supervisor:
         state baton no longer knows, so its pane is asked to report it. A
         project in terminating has a finish that never ran to completion,
         so that finish is resumed. A project in uninitialized, completed,
-        or failed has no worker to reconcile with and is left alone.
+        failed, or closed has no worker to reconcile with and is left
+        alone.
 
         Raises:
             TmuxError: If sending the reconciliation request to the pane

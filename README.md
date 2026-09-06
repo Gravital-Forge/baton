@@ -99,11 +99,10 @@ session: kill it, or pass a `session_name` of your own.
 
 ## Watch the work
 
-Each project runs in a tmux session of its own, named `baton-` followed by the title's slug — the
-title lowercased, with every run of characters outside `a-z0-9` replaced by a single `-`, and
-leading and trailing `-` stripped. Pass `session_name` to `initialize_project` to choose the name
-yourself. `list_projects` gives you every project's session name, along with its id, its phase, and
-its current worker.
+Each project runs in a tmux session of its own, named `baton-` followed by the title's slug. See
+"Project identity" in [`docs/architecture.md`](docs/architecture.md) for how a title becomes a
+slug. Pass `session_name` to `initialize_project` to choose the name yourself. `list_projects`
+gives you every project's session name, along with its id, its phase, and its current worker.
 
 Attach to a session like this:
 
@@ -148,7 +147,9 @@ disk, and `get_project_status` still reads it back by id. A project that is fini
 current worker is refused for the seconds that takes — call again. A close that could not terminate
 the worker or kill the session reports the error and leaves the project in phase `failed` rather
 than retired; call `close_project` again to finish retiring it. A daemon that stops in the middle
-of a close does not carry it through either: the project comes back unretired, so close it again.
+of a close does not carry it through either: the project comes back unretired, and the restart
+launches a diagnosis worker into it, so expect a live Claude Code session in the project you
+retired. Close it again.
 
 See "Recovery" and "Restart reconciliation" in [`docs/architecture.md`](docs/architecture.md) for
 how baton reaches phase `failed` and how it reconciles after a restart.
