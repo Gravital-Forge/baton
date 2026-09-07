@@ -30,6 +30,7 @@ class ProjectPhase(StrEnum):
     recovering = "recovering"
     reconciling = "reconciling"
     blocked = "blocked"
+    waiting = "waiting"
     terminating = "terminating"
     completed = "completed"
     failed = "failed"
@@ -60,6 +61,20 @@ def _is_blank(value: str | None) -> bool:
     return value is None or value.strip() == ""
 
 
+def _is_legal_delay(value: object) -> bool:
+    """Check whether a value is a delay a success report may carry.
+
+    Args:
+        value: The value to check.
+
+    Returns:
+        True if value is a non-negative integer. A bool is refused
+        because ``isinstance(True, int)`` holds, so a JSON ``true``
+        would otherwise read as a one-second delay.
+    """
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 @dataclass(frozen=True)
 class LifecycleReport:
     """A worker's report of its lifecycle state.
@@ -70,18 +85,23 @@ class LifecycleReport:
             except ``running``, where it is optional.
         next_prompt: The next worker's prompt. Required for ``success``
             and forbidden for every other state.
+        delay_seconds: How long baton holds after terminating this
+            worker, before it launches the next one. Allowed only on
+            ``success``, where it must be a whole, non-negative number.
+            None or 0 launches the next worker at once.
     """
 
     state: LifecycleState
     message: str | None = None
     next_prompt: str | None = None
+    delay_seconds: int | None = None
 
     def __post_init__(self) -> None:
         """Validate the payload against this report's state.
 
         Raises:
-            ValueError: If the message or next prompt breaks the payload
-                rule for this report's state.
+            ValueError: If the message, the next prompt, or the delay
+                breaks the payload rule for this report's state.
         """
         message_required = self.state != LifecycleState.running
         if message_required and _is_blank(self.message):
@@ -102,6 +122,18 @@ class LifecycleReport:
                 f"got {self.next_prompt!r}"
             )
 
+        if self.delay_seconds is not None:
+            if self.state != LifecycleState.success:
+                raise ValueError(
+                    f"a {self.state.value!r} report forbids a delay, "
+                    f"got {self.delay_seconds!r}"
+                )
+            if not _is_legal_delay(self.delay_seconds):
+                raise ValueError(
+                    "a delay must be a whole number of seconds and not negative, "
+                    f"got {self.delay_seconds!r}"
+                )
+
     @property
     def is_terminal(self) -> bool:
         """Whether this report ends the worker's run.
@@ -120,12 +152,14 @@ class LifecycleReport:
 
         Returns:
             A mapping of the state as the enum's value string, the
-            message, and the next prompt, each None preserved.
+            message, the next prompt, and the delay in seconds, each
+            None preserved.
         """
         return {
             "state": self.state.value,
             "message": self.message,
             "next_prompt": self.next_prompt,
+            "delay_seconds": self.delay_seconds,
         }
 
 
@@ -185,6 +219,9 @@ class ProjectState:
             before initialization.
         recovery_attempts: The number of diagnosis workers launched since
             the last success report.
+        resume_at: The moment a pending hold ends and the next worker
+            launches, or None when no hold is pending. The caller is
+            responsible for passing a timezone-aware UTC value.
         updated_at: When this state was last written. The caller is
             responsible for passing a timezone-aware UTC value.
     """
@@ -199,6 +236,7 @@ class ProjectState:
     last_report: LifecycleReport | None
     model: str | None
     recovery_attempts: int
+    resume_at: datetime | None
     updated_at: datetime
 
     @classmethod
@@ -225,6 +263,7 @@ class ProjectState:
             last_report=None,
             model=None,
             recovery_attempts=0,
+            resume_at=None,
             updated_at=datetime.now(UTC),
         )
 
@@ -250,8 +289,8 @@ class ProjectState:
             enum's value string, the project path as a string, the
             session name, the pane target, the worker and last report as
             their own mappings, the model, the recovery attempt count,
-            and updated_at as an ISO 8601 string. Every None is
-            preserved.
+            and the resume moment and updated_at as ISO 8601 strings.
+            Every None is preserved.
         """
         return {
             "project_id": self.project_id,
@@ -268,6 +307,7 @@ class ProjectState:
             ),
             "model": self.model,
             "recovery_attempts": self.recovery_attempts,
+            "resume_at": None if self.resume_at is None else self.resume_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
         }
 

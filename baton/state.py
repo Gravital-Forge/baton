@@ -101,6 +101,19 @@ def _decode_time(value: object) -> datetime:
     return datetime.fromisoformat(value)
 
 
+def _decode_optional_time(value: object) -> datetime | None:
+    """Decode a JSON value into an optional datetime.
+
+    Args:
+        value: The decoded JSON value, expected to be an ISO 8601 string
+            or None.
+
+    Returns:
+        The datetime parsed from value, or None when value is None.
+    """
+    return None if value is None else _decode_time(value)
+
+
 def _decode_worker(raw: Mapping[str, object] | None) -> WorkerRecord | None:
     """Decode a WorkerRecord from its JSON mapping.
 
@@ -135,11 +148,17 @@ def _decode_report(raw: Mapping[str, object] | None) -> LifecycleReport | None:
         state=LifecycleState(raw["state"]),
         message=raw["message"],
         next_prompt=raw["next_prompt"],
+        delay_seconds=raw.get("delay_seconds"),
     )
 
 
 def _decode_state(raw: Mapping[str, object]) -> ProjectState:
     """Decode a ProjectState from its JSON mapping.
+
+    ``resume_at`` and the report's ``delay_seconds`` are read leniently,
+    where every other field is read strictly: a state.json that predates
+    the handoff delay carries neither key, and None is the right reading
+    of such a file rather than a shape error.
 
     Args:
         raw: The decoded JSON mapping for a state.json file.
@@ -158,6 +177,7 @@ def _decode_state(raw: Mapping[str, object]) -> ProjectState:
         last_report=_decode_report(raw["last_report"]),
         model=raw["model"],
         recovery_attempts=raw["recovery_attempts"],
+        resume_at=_decode_optional_time(raw.get("resume_at")),
         updated_at=_decode_time(raw["updated_at"]),
     )
 

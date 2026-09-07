@@ -58,6 +58,7 @@ def populated_state(tmp_path: Path) -> ProjectState:
         state=LifecycleState.success,
         message="did the thing",
         next_prompt="do the next thing",
+        delay_seconds=1800,
     )
     return ProjectState(
         project_id="a1b2c3d4",
@@ -70,6 +71,7 @@ def populated_state(tmp_path: Path) -> ProjectState:
         last_report=report,
         model="sonnet",
         recovery_attempts=2,
+        resume_at=datetime(2026, 9, 2, 16, 30, tzinfo=UTC),
         updated_at=datetime(2026, 9, 2, 16, 0, 1, tzinfo=UTC),
     )
 
@@ -108,6 +110,9 @@ def test_round_trip_fully_populated(
     assert loaded.worker.launched_at == populated_state.worker.launched_at
     assert isinstance(loaded.last_report, LifecycleReport)
     assert isinstance(loaded.last_report.state, LifecycleState)
+    assert loaded.last_report.delay_seconds == 1800
+    assert loaded.resume_at == populated_state.resume_at
+    assert loaded.resume_at.tzinfo == UTC
 
 
 def test_round_trip_with_optionals_none(store: StateStore, tmp_path: Path) -> None:
@@ -130,6 +135,7 @@ def test_round_trip_with_optionals_none(store: StateStore, tmp_path: Path) -> No
         last_report=report,
         model=None,
         recovery_attempts=5,
+        resume_at=None,
         updated_at=datetime(2026, 9, 2, 12, 0, 1, tzinfo=UTC),
     )
 
@@ -144,7 +150,9 @@ def test_round_trip_with_optionals_none(store: StateStore, tmp_path: Path) -> No
     assert loaded.worker.pane_pid is None
     assert loaded.last_report is not None
     assert loaded.last_report.next_prompt is None
+    assert loaded.last_report.delay_seconds is None
     assert loaded.model is None
+    assert loaded.resume_at is None
 
 
 def _write_state_file(store: StateStore, text: str) -> None:
@@ -231,6 +239,26 @@ def test_load_revalidates_a_persisted_report(store: StateStore) -> None:
     assert "requires a message" in str(excinfo.value)
 
 
+def test_load_reads_a_state_file_missing_resume_at_and_delay(
+    store: StateStore,
+) -> None:
+    """A state.json missing resume_at and delay_seconds loads both as None."""
+    raw = {
+        **GOOD_STATE_JSON,
+        "last_report": {
+            "state": "success",
+            "message": "did the thing",
+            "next_prompt": "do the next thing",
+        },
+    }
+    _write_state_file(store, json.dumps(raw))
+
+    loaded = store.load()
+
+    assert loaded.resume_at is None
+    assert loaded.last_report.delay_seconds is None
+
+
 def test_round_trip_with_no_worker_and_no_report(store: StateStore) -> None:
     """A state with no worker and no report round-trips, writing JSON nulls."""
     state = ProjectState.new("a1b2c3d4", "Widget factory").updated(
@@ -280,6 +308,7 @@ def test_on_disk_json_has_pinned_shape(
         "last_report",
         "model",
         "recovery_attempts",
+        "resume_at",
         "updated_at",
     ]
     assert raw["project_id"] == "a1b2c3d4"
@@ -300,12 +329,19 @@ def test_on_disk_json_has_pinned_shape(
         populated_state.worker.launched_at.isoformat()
     )
     assert raw["worker"]["pane_pid"] == 4242
-    assert list(raw["last_report"].keys()) == ["state", "message", "next_prompt"]
+    assert list(raw["last_report"].keys()) == [
+        "state",
+        "message",
+        "next_prompt",
+        "delay_seconds",
+    ]
     assert raw["last_report"]["state"] == "success"
     assert raw["last_report"]["message"] == "did the thing"
     assert raw["last_report"]["next_prompt"] == "do the next thing"
+    assert raw["last_report"]["delay_seconds"] == 1800
     assert raw["model"] == "sonnet"
     assert raw["recovery_attempts"] == 2
+    assert raw["resume_at"] == populated_state.resume_at.isoformat()
     assert raw["updated_at"] == populated_state.updated_at.isoformat()
     assert raw_text.endswith("\n")
     assert not raw_text.endswith("\n\n")
