@@ -3377,6 +3377,41 @@ async def test_a_close_whose_session_kill_fails_leaves_the_project_failed(
 
 
 @pytest.mark.anyio
+async def test_a_close_whose_session_kill_fails_during_a_hold_clears_the_deadline(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_id: str,
+    project_dir: Path,
+) -> None:
+    """A close that cannot kill the session still ends the hold it found.
+
+    A holding project left in waiting keeps its deadline on disk, and the
+    next daemon start resumes that hold and launches a worker into the
+    project the operator had retired.
+    """
+    tmux = make_tmux(
+        sessions=[SESSION_NAME], kill_session_errors=[TmuxError("server gone")]
+    )
+    _persist_waiting_project(
+        store,
+        project_id,
+        project_dir,
+        resume_at=datetime.now(UTC) + timedelta(seconds=60),
+        next_prompt="phase two",
+    )
+    supervisor = _persisted_supervisor(config, store, tmux, launcher)
+
+    with pytest.raises(TmuxError):
+        await supervisor.close()
+
+    for persisted in _persisted_and_live(store, supervisor):
+        assert persisted.phase == ProjectPhase.failed
+        assert persisted.resume_at is None
+
+
+@pytest.mark.anyio
 async def test_a_project_a_failed_close_gave_up_can_be_closed_again(
     config: BatonConfig,
     store: StateStore,

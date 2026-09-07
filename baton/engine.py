@@ -238,6 +238,9 @@ class Supervisor:
         is cancelled before the lock is taken and before the no-worker
         shortcut retires it. Without that cancel, the hold would wake
         after the retirement and launch a worker into a closed project.
+        A retirement that fails gives the project up rather than leaving
+        it in waiting, so the deadline on disk cannot outlive the close
+        either.
 
         Returns:
             The committed ProjectState, in phase closed.
@@ -246,10 +249,10 @@ class Supervisor:
             SupervisorError: If the project is already terminating, which
                 a finish already under way would commit over the top of.
                 That phase lasts seconds; the caller retries.
-            TmuxError: If killing the project's session fails. A worker
-                terminated before that failure leaves the project failed
-                rather than terminating, so a later close can still
-                retire it.
+            TmuxError: If killing the project's session fails. The
+                project is left failed rather than in the phase the close
+                stopped at, so a later close can still retire it and no
+                deadline outlives it.
         """
         if self._state.phase == ProjectPhase.waiting:
             await self._cancel_hold()
@@ -263,7 +266,11 @@ class Supervisor:
                 )
             worker = self._state.worker
             if worker is None:
-                return self._retire()
+                try:
+                    return self._retire()
+                except Exception as exc:
+                    self._give_up_on_close(exc)
+                    raise
             self._commit(
                 self._state.updated(phase=ProjectPhase.terminating, last_report=None),
                 reason="the project was closed",
@@ -275,17 +282,8 @@ class Supervisor:
             async with self._lock:
                 return self._retire()
         except Exception as exc:
-            _log.exception("retiring the project failed")
-            # The project must not be left in terminating: that phase
-            # refuses every later close, every report and every resume,
-            # and check_worker skips it, so nothing would move the project
-            # until the daemon restarted. failed is a phase a later close
-            # can retire.
             async with self._lock:
-                self._commit(
-                    self._state.updated(phase=ProjectPhase.failed, worker=None),
-                    reason=f"retiring the project failed: {exc}",
-                )
+                self._give_up_on_close(exc)
             raise
 
     async def record_status(self, worker_id: str, message: str) -> None:
@@ -649,6 +647,31 @@ class Supervisor:
             self._state.updated(phase=ProjectPhase.closed, worker=None, resume_at=None)
         )
         return self._state
+
+    def _give_up_on_close(self, exc: Exception) -> None:
+        """Give the project up after a close failed, leaving nothing live behind.
+
+        Called with the lock held, and from inside an except block: the
+        log call records the exception being handled, which only that
+        context supplies.
+
+        The project must not be left in the phase the close stopped at.
+        terminating refuses every later close, every report and every
+        resume, and check_worker skips it, so nothing would move the
+        project until the daemon restarted. waiting keeps a deadline on
+        disk that the next start would wait out, launching a worker into
+        the project the operator had just retired. failed is a phase a
+        later close can retire, and it carries no deadline.
+
+        Args:
+            exc: The exception that ended the close, folded into the
+                phase event's reason.
+        """
+        _log.exception("retiring the project failed")
+        self._commit(
+            self._state.updated(phase=ProjectPhase.failed, worker=None, resume_at=None),
+            reason=f"retiring the project failed: {exc}",
+        )
 
     def _require_current_worker(self, worker_id: str) -> None:
         """Refuse a call from a worker that is not the current one.

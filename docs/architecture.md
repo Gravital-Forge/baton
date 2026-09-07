@@ -174,9 +174,11 @@ a project already in phase `terminating` and names the phase. That phase lasts s
 retries.
 
 A close whose termination or session kill raises commits phase `failed` with the reason, rather than
-leaving the project in `terminating` — a phase that refuses every later close, every report and
-every resume, and that `check_worker` skips, so nothing would move the project until the daemon
-restarted. The failure still reaches the caller, and a later close can retire the project.
+leaving the project where the close stopped. A project left in `terminating` refuses every later
+close, every report and every resume, and `check_worker` skips it, so nothing would move it until
+the daemon restarted. One left in `waiting` keeps its deadline, and the next start would wait that
+hold out and launch a worker into the project the operator had retired. The failure still reaches
+the caller, and a later close can retire the project.
 
 A closed project leaves `list_projects` but stays reachable by its id. Its state directory is the
 record of what ran, and `get_project_status` reads it back.
