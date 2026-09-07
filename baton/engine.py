@@ -719,20 +719,12 @@ class Supervisor:
             async with self._lock:
                 self._route(report)
         except Exception as exc:
-            _log.exception("the handoff after a %r report failed", report.state.value)
             # Whatever went wrong, the project must not be left in
             # terminating: that phase refuses every later report and every
             # new initialization, so nothing would move until the daemon
             # restarted and resumed the finish. The raise keeps the failure
             # retrievable through wait_for_finish.
-            async with self._lock:
-                self._commit(
-                    self._state.updated(
-                        phase=ProjectPhase.failed, worker=None, resume_at=None
-                    ),
-                    reason=f"the handoff after a {report.state.value!r} "
-                    f"report failed: {exc}",
-                )
+            await self._fail_handoff(report, exc)
             raise
 
     async def _resume_hold(self) -> None:
@@ -748,20 +740,38 @@ class Supervisor:
         draining it, so wait_for_finish is never reached.
         """
         report = self._state.last_report
-        await _sleep_until(self._state.resume_at)
         try:
+            await _sleep_until(self._state.resume_at)
             async with self._lock:
                 self._route(report)
         except Exception as exc:  # noqa: BLE001 - nothing awaits this task
-            _log.exception("the handoff after a %r report failed", report.state.value)
-            async with self._lock:
-                self._commit(
-                    self._state.updated(
-                        phase=ProjectPhase.failed, worker=None, resume_at=None
-                    ),
-                    reason=f"the handoff after a {report.state.value!r} "
-                    f"report failed: {exc}",
-                )
+            await self._fail_handoff(report, exc)
+
+    async def _fail_handoff(self, report: LifecycleReport, exc: Exception) -> None:
+        """Give the project up after a handoff failed, recording why.
+
+        What a failed handoff means to a project, for both the finish
+        that routes a fresh report and the hold resumed at startup: it
+        must not be left in the phase it was passing through, and no
+        deadline may outlive it.
+
+        Call this from inside an except block. The log call records the
+        exception being handled, which only that context supplies.
+
+        Args:
+            report: The terminal report whose handoff failed.
+            exc: The exception that ended the handoff, folded into the
+                phase event's reason.
+        """
+        _log.exception("the handoff after a %r report failed", report.state.value)
+        async with self._lock:
+            self._commit(
+                self._state.updated(
+                    phase=ProjectPhase.failed, worker=None, resume_at=None
+                ),
+                reason=f"the handoff after a {report.state.value!r} "
+                f"report failed: {exc}",
+            )
 
     async def _cancel_hold(self) -> None:
         """Cancel a pending hold, so nothing it would have done still happens.
