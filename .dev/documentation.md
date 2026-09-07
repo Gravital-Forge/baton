@@ -7,4 +7,4 @@ Only the operator adds a kept document.
 
 Everything else resolves to the workspace root: the `implementation` skill for a work item's working
 documents, the `task-management` topic for the pull request as the item's record, and CLAUDE.md's
-Writing section for the style every kept document must satisfy.
+Writing section for the style every committed document must satisfy.
