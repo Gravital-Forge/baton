@@ -813,6 +813,24 @@ async def test_resume_of_an_unknown_project_is_refused_and_named(
 
 
 @pytest.mark.anyio
+async def test_resume_launches_the_fresh_worker_on_the_model_it_names(
+    config: BatonConfig, tmux: FakeTmux, launcher: FakeLauncher, project_dir: Path
+) -> None:
+    """Resume passes its model down, so the fresh worker launches on it."""
+    coordinator = Coordinator(config, tmux, launcher)
+    project = await coordinator.initialize(project_dir, TITLE, "start here")
+    supervisor = coordinator.supervisor(project.project_id)
+    await supervisor.report_lifecycle(
+        project.worker.worker_id, LifecycleState.completed, message="all done"
+    )
+    await supervisor.wait_for_finish()
+
+    await coordinator.resume(project.project_id, "carry on", model="fable")
+
+    assert launcher.launches[-1]["model"] == "fable"
+
+
+@pytest.mark.anyio
 async def test_close_retires_the_named_project(
     config: BatonConfig, tmux: FakeTmux, launcher: FakeLauncher, project_dir: Path
 ) -> None:

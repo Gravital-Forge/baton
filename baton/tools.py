@@ -163,15 +163,21 @@ class BatonTools:
             ]
         }
 
-    async def resume_project(self, project_id: str, prompt: str) -> dict[str, object]:
+    async def resume_project(
+        self, project_id: str, prompt: str, model: str | None = None
+    ) -> dict[str, object]:
         """Carry a stopped project on by launching a fresh worker.
 
         The setup agent calls this, not a worker. Use it on a project that
         has stopped — one whose phase is ``completed`` or ``failed``. The
         project keeps its id, title, tmux session and event log, and the
-        new worker runs on the model the project was created with. A
-        project that still has a worker is refused, and so is one you have
-        closed: closing retires a project for good.
+        new worker runs on the project's model unless you name another
+        here. A project that still has a worker is refused, and so is one
+        you have closed: closing retires a project for good.
+
+        A model named here governs the resumed worker alone. The project
+        keeps its own model, which the worker after this one runs on
+        unless that worker's own report names another.
 
         The prompt is the whole of the new worker's context, exactly as an
         initial prompt is. That worker remembers nothing of the workers
@@ -181,6 +187,11 @@ class BatonTools:
             project_id: The id of the project to carry on.
             prompt: The task the new worker is launched with. It must not
                 be blank.
+            model: The model the resumed worker runs on, for that worker
+                alone. Omit it to run on the project's model. Whatever
+                ``claude --model`` accepts on this machine is legal — an
+                alias, or a model's full name, as ``claude --help``
+                describes it.
 
         Returns:
             The project's phase and the id of the worker baton now
@@ -188,11 +199,12 @@ class BatonTools:
 
         Raises:
             ToolError: If baton holds no project with that id; if the
-                project has not stopped; if the prompt is blank; or if the
-                tmux command needed to launch the worker fails.
+                project has not stopped; if the prompt or a given model is
+                blank; or if the tmux command needed to launch the worker
+                fails.
         """
         try:
-            state = await self._coordinator.resume(project_id, prompt)
+            state = await self._coordinator.resume(project_id, prompt, model)
         except (CoordinatorError, SupervisorError, TmuxError) as exc:
             raise ToolError(str(exc)) from exc
         return {"phase": state.phase.value, "worker_id": _worker_id(state)}

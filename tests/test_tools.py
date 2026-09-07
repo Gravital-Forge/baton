@@ -703,16 +703,35 @@ async def test_list_projects_with_no_project_returns_an_empty_projects_list(
 
 
 @pytest.mark.anyio
-async def test_resume_project_delegates_the_project_id_and_prompt(
+async def test_resume_project_delegates_every_argument(
     make_stub_coordinator: type[StubCoordinator],
 ) -> None:
-    """resume_project delegates the project id and the prompt."""
+    """resume_project delegates the project id, the prompt and the model."""
+    stub = make_stub_coordinator()
+    tools = BatonTools(stub)
+
+    await tools.resume_project(project_id="a1b2c3d4", prompt="carry on", model="fable")
+
+    assert stub.resume_calls == [
+        {"project_id": "a1b2c3d4", "prompt": "carry on", "model": "fable"}
+    ]
+
+
+@pytest.mark.anyio
+async def test_resume_project_omits_the_model_by_default(
+    make_stub_coordinator: type[StubCoordinator],
+) -> None:
+    """A resume naming no model reaches the coordinator with None.
+
+    None is what leaves the project's model governing the resumed worker,
+    so the tool must invent no value of its own here.
+    """
     stub = make_stub_coordinator()
     tools = BatonTools(stub)
 
     await tools.resume_project(project_id="a1b2c3d4", prompt="carry on")
 
-    assert stub.resume_calls == [{"project_id": "a1b2c3d4", "prompt": "carry on"}]
+    assert stub.resume_calls[0]["model"] is None
 
 
 @pytest.mark.anyio
@@ -767,6 +786,22 @@ async def test_resume_project_surfaces_a_supervisor_error_as_a_tool_error(
     assert str(excinfo.value) == (
         "only a project in phase 'completed' or 'failed' can be resumed, got 'running'"
     )
+
+
+@pytest.mark.anyio
+async def test_resume_project_surfaces_a_blank_model_as_a_tool_error(
+    make_stub_coordinator: type[StubCoordinator],
+) -> None:
+    """resume_project surfaces a refused model as an identical ToolError."""
+    stub = make_stub_coordinator(
+        resume_error=SupervisorError("model must not be blank, got '  '"),
+    )
+    tools = BatonTools(stub)
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.resume_project(project_id="a1b2c3d4", prompt="carry on", model="  ")
+
+    assert str(excinfo.value) == "model must not be blank, got '  '"
 
 
 @pytest.mark.anyio

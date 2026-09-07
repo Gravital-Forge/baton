@@ -171,7 +171,7 @@ class Supervisor:
             )
             return self._state
 
-    async def resume(self, prompt: str) -> ProjectState:
+    async def resume(self, prompt: str, model: str | None = None) -> ProjectState:
         """Carry a stopped project on with a fresh worker.
 
         The project keeps its id, title, session name, path, model and
@@ -179,15 +179,22 @@ class Supervisor:
         and the last report is cleared, so a stopped worker's outcome is
         not read back as though it were the new worker's.
 
+        A model given here governs the resumed worker alone. The
+        project's own model is left as it was, so the worker after this
+        one runs on it again unless that worker's report names another.
+
         Args:
             prompt: The task the new worker is launched with.
+            model: The model the resumed worker runs on, for that worker
+                alone, or None to run it on the project's model.
 
         Returns:
             The committed ProjectState, in phase running.
 
         Raises:
             SupervisorError: If the project has not stopped — any phase
-                but completed or failed — or if prompt is blank.
+                but completed or failed — or if prompt or a given model
+                is blank.
             TmuxError: If creating the session or launching the worker
                 fails.
         """
@@ -200,12 +207,14 @@ class Supervisor:
                 )
             if prompt.strip() == "":
                 raise SupervisorError(f"prompt must not be blank, got {prompt!r}")
+            if model is not None and model.strip() == "":
+                raise SupervisorError(f"model must not be blank, got {model!r}")
 
             record = self._launch_worker(
                 self._state.project_path,
                 self._state.session_name,
                 prompt,
-                self._state.model,
+                model.strip() if model is not None else self._state.model,
             )
             self._commit(
                 self._state.updated(
