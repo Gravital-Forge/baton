@@ -6,13 +6,13 @@ import re
 import signal
 from collections.abc import Callable
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from baton.config import BatonConfig
-from baton.engine import Supervisor, SupervisorError
+from baton.engine import Supervisor, SupervisorError, _sleep_until
 from baton.models import (
     EventKind,
     LifecycleReport,
@@ -150,6 +150,58 @@ def _persisted_supervisor(
     return Supervisor(
         config=config, store=store, tmux=tmux, launcher=launcher, state=store.load()
     )
+
+
+class _FakeHold:
+    """A stand-in for the engine's `_sleep_until`, released by hand.
+
+    Patched over the module function a hold sleeps through, so a test
+    drives the release itself and waits on no real clock.
+    """
+
+    def __init__(self) -> None:
+        """Start with no deadline seen, not yet entered, and not released."""
+        self.deadlines: list[datetime] = []
+        self._entered = asyncio.Event()
+        self._released = asyncio.Event()
+
+    async def sleep_until(self, deadline: datetime) -> None:
+        """Record the deadline and wait there until the test releases it.
+
+        Args:
+            deadline: The moment the supervisor asked to sleep until.
+        """
+        self.deadlines.append(deadline)
+        self._entered.set()
+        await self._released.wait()
+
+    def release(self) -> None:
+        """Let a supervisor waiting in the hold carry on."""
+        self._released.set()
+
+    async def wait_until_held(self) -> None:
+        """Wait for a supervisor to reach the hold.
+
+        Raises:
+            TimeoutError: If no supervisor reaches the hold within a
+                second. The suite sets no timeout of its own, so a hold
+                that is never reached would otherwise hang the run.
+        """
+        await asyncio.wait_for(self._entered.wait(), timeout=1)
+
+
+def _hold_the_sleep(monkeypatch: pytest.MonkeyPatch) -> _FakeHold:
+    """Patch the hold's sleep with a `_FakeHold` and hand it back.
+
+    Args:
+        monkeypatch: The fixture the patch is undone by.
+
+    Returns:
+        The `_FakeHold` now standing in for `baton.engine._sleep_until`.
+    """
+    hold = _FakeHold()
+    monkeypatch.setattr("baton.engine._sleep_until", hold.sleep_until)
+    return hold
 
 
 def test_supervisor_holds_the_state_it_was_given(
@@ -1062,6 +1114,427 @@ async def test_a_failed_handoff_is_logged_when_it_happens(
     assert records[0].levelno == logging.ERROR
     assert records[0].getMessage() == "the handoff after a 'success' report failed"
     assert records[0].exc_info is not None
+
+
+@pytest.mark.anyio
+async def test_sleep_until_a_deadline_already_past_returns_at_once() -> None:
+    """A deadline in the past is not slept on."""
+    started = datetime.now(UTC)
+
+    await _sleep_until(started - timedelta(seconds=30))
+
+    assert datetime.now(UTC) - started < timedelta(seconds=1)
+
+
+@pytest.mark.anyio
+async def test_sleep_until_a_future_deadline_returns_after_it() -> None:
+    """A deadline ahead is slept out before the call returns."""
+    deadline = datetime.now(UTC) + timedelta(milliseconds=20)
+
+    await _sleep_until(deadline)
+
+    assert datetime.now(UTC) >= deadline
+
+
+@pytest.mark.anyio
+async def test_a_delayed_success_moves_through_waiting_to_running(
+    store: StateStore,
+    supervisor: Supervisor,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delayed success holds in waiting with no worker, then runs on release."""
+    hold = _hold_the_sleep(monkeypatch)
+    result = await supervisor.initialize(project_dir, "start here")
+
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        delay_seconds=60,
+    )
+    await hold.wait_until_held()
+
+    for state in _persisted_and_live(store, supervisor):
+        assert state.phase == ProjectPhase.waiting
+        assert state.worker is None
+        assert state.resume_at is not None
+    assert hold.deadlines == [supervisor.snapshot().resume_at]
+
+    hold.release()
+    await supervisor.wait_for_finish()
+
+    for state in _persisted_and_live(store, supervisor):
+        assert state.phase == ProjectPhase.running
+        assert state.worker is not None
+        assert state.worker.worker_id == "worker-2"
+        assert state.resume_at is None
+
+
+@pytest.mark.anyio
+async def test_a_delayed_success_records_the_phase_move_into_waiting(
+    supervisor: Supervisor,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The phase events run terminating, waiting, running, and name the delay."""
+    hold = _hold_the_sleep(monkeypatch)
+    result = await supervisor.initialize(project_dir, "start here")
+
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        delay_seconds=60,
+    )
+    await hold.wait_until_held()
+    deadline = supervisor.snapshot().resume_at
+    hold.release()
+    await supervisor.wait_for_finish()
+
+    phase_events = [
+        event
+        for event in supervisor.recent_events(count=20)
+        if event.kind == EventKind.phase
+    ]
+    assert [(event.payload["from"], event.payload["to"]) for event in phase_events] == [
+        (ProjectPhase.uninitialized.value, ProjectPhase.running.value),
+        (ProjectPhase.running.value, ProjectPhase.terminating.value),
+        (ProjectPhase.terminating.value, ProjectPhase.waiting.value),
+        (ProjectPhase.waiting.value, ProjectPhase.running.value),
+    ]
+    assert deadline is not None
+    waiting_reason = str(phase_events[2].payload["reason"])
+    assert "60 seconds" in waiting_reason
+    assert deadline.isoformat() in waiting_reason
+
+
+@pytest.mark.anyio
+async def test_the_next_worker_launches_only_after_the_hold_is_released(
+    supervisor: Supervisor,
+    launcher: FakeLauncher,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No next worker is launched while the hold is still pending."""
+    hold = _hold_the_sleep(monkeypatch)
+    result = await supervisor.initialize(project_dir, "start here")
+
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        delay_seconds=60,
+    )
+    await hold.wait_until_held()
+
+    assert len(launcher.launches) == 1
+
+    hold.release()
+    await supervisor.wait_for_finish()
+
+    assert len(launcher.launches) == 2
+    assert launcher.launches[1]["prompt"] == "phase two"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("delay_seconds", [None, 0])
+async def test_a_success_report_without_a_positive_delay_never_waits(
+    supervisor: Supervisor,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    delay_seconds: int | None,
+) -> None:
+    """An omitted or zero delay hands off with no hold and no resume moment."""
+    hold = _hold_the_sleep(monkeypatch)
+    # Released up front, so a hold entered wrongly fails the assertion
+    # below rather than hanging a suite that sets no timeout.
+    hold.release()
+    result = await supervisor.initialize(project_dir, "start here")
+
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        delay_seconds=delay_seconds,
+    )
+    await supervisor.wait_for_finish()
+
+    assert hold.deadlines == []
+    state = supervisor.snapshot()
+    assert state.phase == ProjectPhase.running
+    assert state.resume_at is None
+
+
+@pytest.mark.anyio
+async def test_a_delay_above_the_cap_is_refused_before_any_phase_moves(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_id: str,
+    project_dir: Path,
+) -> None:
+    """A delay past the configured maximum is refused, moving nothing."""
+    config = replace(config, max_handoff_delay=60)
+    supervisor = Supervisor(
+        config=config,
+        store=store,
+        tmux=tmux,
+        launcher=launcher,
+        state=_new_state(project_id),
+    )
+    result = await supervisor.initialize(project_dir, "start here")
+    snapshot_before = supervisor.snapshot()
+    events_before = supervisor.recent_events(count=10)
+
+    expected = "a delay of 61 seconds exceeds the maximum of 60 seconds"
+    with pytest.raises(SupervisorError, match=re.escape(expected)):
+        await supervisor.report_lifecycle(
+            result.worker.worker_id,
+            LifecycleState.success,
+            message="phase one done",
+            next_prompt="phase two",
+            delay_seconds=61,
+        )
+
+    assert supervisor.snapshot() == snapshot_before
+    assert supervisor.recent_events(count=10) == events_before
+
+
+@pytest.mark.anyio
+async def test_a_delay_at_exactly_the_cap_is_accepted(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_id: str,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delay equal to the configured maximum holds rather than being refused."""
+    hold = _hold_the_sleep(monkeypatch)
+    hold.release()
+    config = replace(config, max_handoff_delay=60)
+    supervisor = Supervisor(
+        config=config,
+        store=store,
+        tmux=tmux,
+        launcher=launcher,
+        state=_new_state(project_id),
+    )
+    result = await supervisor.initialize(project_dir, "start here")
+
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        delay_seconds=60,
+    )
+    await supervisor.wait_for_finish()
+
+    assert len(hold.deadlines) == 1
+    assert supervisor.snapshot().phase == ProjectPhase.running
+
+
+@pytest.mark.anyio
+async def test_the_lifecycle_event_carries_the_delay(
+    supervisor: Supervisor,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lifecycle event records the delay the report asked for."""
+    hold = _hold_the_sleep(monkeypatch)
+    hold.release()
+    result = await supervisor.initialize(project_dir, "start here")
+
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        delay_seconds=60,
+    )
+    await supervisor.wait_for_finish()
+
+    lifecycle_event = next(
+        event
+        for event in supervisor.recent_events(count=20)
+        if event.kind == EventKind.lifecycle
+    )
+    assert lifecycle_event.payload == {
+        "state": "success",
+        "message": "phase one done",
+        "next_prompt": "phase two",
+        "delay_seconds": 60,
+    }
+
+
+@pytest.mark.anyio
+async def test_a_watchdog_tick_during_a_hold_recovers_nothing(
+    supervisor: Supervisor,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The watchdog reads no pane during a hold, because there is no worker."""
+    hold = _hold_the_sleep(monkeypatch)
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        delay_seconds=60,
+    )
+    await hold.wait_until_held()
+    pane_reads = len(tmux.pane_info_calls)
+
+    await supervisor.check_worker()
+
+    assert len(tmux.pane_info_calls) == pane_reads
+    assert supervisor.snapshot().phase == ProjectPhase.waiting
+    assert len(launcher.launches) == 1
+
+    hold.release()
+    await supervisor.wait_for_finish()
+
+
+@pytest.mark.anyio
+async def test_a_hold_holds_no_lock_across_the_wait(
+    supervisor: Supervisor,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A watchdog tick still completes while a project waits out its hold.
+
+    check_worker takes the same lock the finish does. A hold that kept
+    that lock across its wait would block vanish detection for every
+    other project for the length of the delay, so this call would never
+    return.
+    """
+    hold = _hold_the_sleep(monkeypatch)
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        delay_seconds=60,
+    )
+    await hold.wait_until_held()
+
+    await asyncio.wait_for(supervisor.check_worker(), timeout=1)
+
+    assert supervisor.snapshot().phase == ProjectPhase.waiting
+
+    hold.release()
+    await supervisor.wait_for_finish()
+
+
+@pytest.mark.anyio
+async def test_a_report_arriving_during_a_hold_is_refused(
+    supervisor: Supervisor,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hold has no current worker, so a report from the finished one is refused."""
+    hold = _hold_the_sleep(monkeypatch)
+    result = await supervisor.initialize(project_dir, "start here")
+    worker_id = result.worker.worker_id
+    await supervisor.report_lifecycle(
+        worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        delay_seconds=60,
+    )
+    await hold.wait_until_held()
+
+    expected = f"worker {worker_id!r} is not the current worker; no worker is running"
+    with pytest.raises(SupervisorError, match=re.escape(expected)):
+        await supervisor.report_lifecycle(
+            worker_id, LifecycleState.running, message="still here"
+        )
+
+    hold.release()
+    await supervisor.wait_for_finish()
+
+
+@pytest.mark.anyio
+async def test_a_finish_that_sees_a_shutdown_stops_in_waiting_without_holding(
+    store: StateStore,
+    supervisor: Supervisor,
+    launcher: FakeLauncher,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shutdown reaching a delayed finish leaves it in waiting, never sleeping."""
+    hold = _hold_the_sleep(monkeypatch)
+    result = await supervisor.initialize(project_dir, "start here")
+
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        delay_seconds=60,
+    )
+    monkeypatch.setattr(supervisor, "_shutting_down", True)
+    await supervisor.wait_for_finish()
+
+    assert hold.deadlines == []
+    for state in _persisted_and_live(store, supervisor):
+        assert state.phase == ProjectPhase.waiting
+        assert state.resume_at is not None
+        assert state.worker is None
+    assert len(launcher.launches) == 1
+
+
+@pytest.mark.anyio
+async def test_a_route_that_fails_after_a_hold_ends_in_failed_with_no_resume_at(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    make_launcher: Callable[..., FakeLauncher],
+    project_id: str,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A launch that fails after the hold lands in failed with no deadline left."""
+    hold = _hold_the_sleep(monkeypatch)
+    launcher = make_launcher(launch_errors=[None, TmuxError("session gone")])
+    supervisor = Supervisor(
+        config=config,
+        store=store,
+        tmux=tmux,
+        launcher=launcher,
+        state=_new_state(project_id),
+    )
+    result = await supervisor.initialize(project_dir, "start here")
+
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        delay_seconds=60,
+    )
+    await hold.wait_until_held()
+    hold.release()
+    with pytest.raises(TmuxError, match="session gone"):
+        await supervisor.wait_for_finish()
+
+    for state in _persisted_and_live(store, supervisor):
+        assert state.phase == ProjectPhase.failed
+        assert state.worker is None
+        assert state.resume_at is None
 
 
 @pytest.mark.anyio

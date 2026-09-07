@@ -10,6 +10,7 @@ import asyncio
 import logging
 import signal
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from baton.config import BatonConfig
@@ -40,6 +41,17 @@ def _pane_target(session: str) -> str:
         The pane target within the session's sole worker window.
     """
     return f"{session}:worker.0"
+
+
+async def _sleep_until(deadline: datetime) -> None:
+    """Sleep until an absolute moment has passed.
+
+    Args:
+        deadline: The UTC moment to sleep until. One already past
+            returns at once.
+    """
+    remaining = (deadline - datetime.now(UTC)).total_seconds()
+    await asyncio.sleep(max(remaining, 0.0))
 
 
 class SupervisorError(Exception):
@@ -87,6 +99,7 @@ class Supervisor:
         self._lock = asyncio.Lock()
         self._finish_task: asyncio.Task[None] | None = None
         self._reconciliation_deadline: float | None = None
+        self._shutting_down = False
 
     async def initialize(
         self,
@@ -199,6 +212,7 @@ class Supervisor:
                     worker=record,
                     last_report=None,
                     recovery_attempts=0,
+                    resume_at=None,
                 )
             )
             return self._state
@@ -289,6 +303,7 @@ class Supervisor:
         state: LifecycleState,
         message: str | None = None,
         next_prompt: str | None = None,
+        delay_seconds: int | None = None,
     ) -> None:
         """Record a worker's lifecycle report and route on it.
 
@@ -303,18 +318,32 @@ class Supervisor:
                 state except running.
             next_prompt: The next worker's prompt, required for success
                 and forbidden otherwise.
+            delay_seconds: How long the handoff holds after this worker
+                is terminated, allowed only with success. None or 0
+                launches the next worker at once.
 
         Raises:
             SupervisorError: If the report's payload breaks its state's
-                rule, if worker_id is not the current worker's id, or if
-                the project is already terminating.
+                rule, if delay_seconds exceeds the configured maximum,
+                if worker_id is not the current worker's id, or if the
+                project is already terminating.
         """
         try:
             report = LifecycleReport(
-                state=state, message=message, next_prompt=next_prompt
+                state=state,
+                message=message,
+                next_prompt=next_prompt,
+                delay_seconds=delay_seconds,
             )
         except ValueError as exc:
             raise SupervisorError(str(exc)) from exc
+
+        cap = self._config.max_handoff_delay
+        if delay_seconds is not None and delay_seconds > cap:
+            raise SupervisorError(
+                f"a delay of {delay_seconds} seconds exceeds the maximum of "
+                f"{cap} seconds"
+            )
 
         async with self._lock:
             self._require_current_worker(worker_id)
@@ -332,6 +361,7 @@ class Supervisor:
                     "state": report.state.value,
                     "message": report.message,
                     "next_prompt": report.next_prompt,
+                    "delay_seconds": report.delay_seconds,
                 },
             )
 
@@ -586,7 +616,9 @@ class Supervisor:
         session = self._state.session_name
         if self._tmux.has_session(session=session):
             self._tmux.kill_session(session=session)
-        self._commit(self._state.updated(phase=ProjectPhase.closed, worker=None))
+        self._commit(
+            self._state.updated(phase=ProjectPhase.closed, worker=None, resume_at=None)
+        )
         return self._state
 
     def _require_current_worker(self, worker_id: str) -> None:
@@ -616,6 +648,18 @@ class Supervisor:
         See "The normal loop" in docs/architecture.md for the grace period
         and for where each terminal report routes the project next.
 
+        A report carrying a delay holds between the termination and the
+        route: the project moves to waiting, with the deadline persisted
+        and the worker cleared, and the next worker launches once that
+        deadline has passed. Clearing the worker is what keeps the hold
+        alive: check_worker reads a dead pane on a project that still
+        names a worker as a vanish, and would recover the project on its
+        next tick. The lock is taken in stretches around the wait rather
+        than across it, for the reason close documents. A shutdown that
+        reaches the supervisor before the hold begins stops the finish
+        there instead, with the deadline already persisted for the next
+        start to resume.
+
         Args:
             report: The terminal lifecycle report that triggered this
                 finish, captured when it was scheduled.
@@ -625,6 +669,24 @@ class Supervisor:
         await asyncio.sleep(self._config.grace_period)
         try:
             await self._terminate(worker)
+            delay_seconds = report.delay_seconds
+            if delay_seconds is not None and delay_seconds > 0:
+                async with self._lock:
+                    deadline = datetime.now(UTC) + timedelta(seconds=delay_seconds)
+                    self._commit(
+                        self._state.updated(
+                            phase=ProjectPhase.waiting,
+                            worker=None,
+                            resume_at=deadline,
+                        ),
+                        reason=(
+                            f"the worker asked for a delay of {delay_seconds} "
+                            f"seconds, until {deadline.isoformat()}"
+                        ),
+                    )
+                    if self._shutting_down:
+                        return
+                await _sleep_until(deadline)
             async with self._lock:
                 self._route(report)
         except Exception as exc:
@@ -636,7 +698,9 @@ class Supervisor:
             # retrievable through wait_for_finish.
             async with self._lock:
                 self._commit(
-                    self._state.updated(phase=ProjectPhase.failed, worker=None),
+                    self._state.updated(
+                        phase=ProjectPhase.failed, worker=None, resume_at=None
+                    ),
                     reason=f"the handoff after a {report.state.value!r} "
                     f"report failed: {exc}",
                 )
@@ -693,7 +757,10 @@ class Supervisor:
             )
             self._commit(
                 self._state.updated(
-                    phase=ProjectPhase.running, worker=record, recovery_attempts=0
+                    phase=ProjectPhase.running,
+                    worker=record,
+                    recovery_attempts=0,
+                    resume_at=None,
                 )
             )
         elif report.state == LifecycleState.completed:
