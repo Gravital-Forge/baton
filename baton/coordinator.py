@@ -172,8 +172,9 @@ class Coordinator:
             initial_prompt: The prompt the first worker is launched with.
             session_name: The tmux session to use, or None to derive one
                 from the title.
-            model: The model every worker of this project runs on, or
-                None to use the daemon's configured default.
+            model: The project's default model, which a worker runs on
+                when nothing overrides it, or None to use the daemon's
+                configured default.
 
         Returns:
             The new project's committed ProjectState, in phase running.

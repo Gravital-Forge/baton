@@ -300,6 +300,7 @@ async def test_report_lifecycle_converts_state_and_delegates_every_argument(
         message="task done",
         next_prompt="do the next thing",
         delay_seconds=90,
+        model="fable",
     )
 
     assert stub.supervisor_for_worker_calls == ["worker-1"]
@@ -310,6 +311,7 @@ async def test_report_lifecycle_converts_state_and_delegates_every_argument(
             "message": "task done",
             "next_prompt": "do the next thing",
             "delay_seconds": 90,
+            "model": "fable",
         }
     ]
 
@@ -336,6 +338,30 @@ async def test_report_lifecycle_omits_the_delay_by_default(
     )
 
     assert supervisor.report_lifecycle_calls[0]["delay_seconds"] is None
+
+
+@pytest.mark.anyio
+async def test_report_lifecycle_omits_the_model_by_default(
+    make_stub_coordinator: type[StubCoordinator],
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """A report naming no model reaches the supervisor with None.
+
+    None is what leaves the project's model governing the next worker, so
+    the tool must invent no value of its own here.
+    """
+    supervisor = make_stub_supervisor()
+    stub = make_stub_coordinator(supervisor=supervisor)
+    tools = BatonTools(stub)
+
+    await tools.report_lifecycle(
+        worker_id="worker-1",
+        state="success",
+        message="task done",
+        next_prompt="do the next thing",
+    )
+
+    assert supervisor.report_lifecycle_calls[0]["model"] is None
 
 
 @pytest.mark.anyio
@@ -446,6 +472,34 @@ async def test_report_lifecycle_leaves_the_delay_cap_to_the_supervisor(
     assert str(excinfo.value) == (
         "a delay of 100000 seconds exceeds the maximum of 86400 seconds"
     )
+
+
+@pytest.mark.anyio
+async def test_report_lifecycle_leaves_a_blank_model_to_the_supervisor(
+    make_stub_coordinator: type[StubCoordinator],
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """A blank model reaches the supervisor, whose refusal comes back whole.
+
+    The tool holds no set of legal model names and checks nothing of its
+    own: what a model may be is the supervisor's to refuse.
+    """
+    supervisor = make_stub_supervisor(
+        report_lifecycle_error=SupervisorError("model must not be blank, got '  '"),
+    )
+    stub = make_stub_coordinator(supervisor=supervisor)
+    tools = BatonTools(stub)
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.report_lifecycle(
+            worker_id="worker-1",
+            state="success",
+            message="done",
+            next_prompt="next task",
+            model="  ",
+        )
+
+    assert str(excinfo.value) == "model must not be blank, got '  '"
 
 
 @pytest.mark.anyio

@@ -96,10 +96,10 @@ class BatonTools:
         another. The title and the initial prompt must not be blank, and
         neither may a session name when you give one.
 
-        Every worker of this project runs on one explicitly chosen model:
-        the ``model`` argument, else the daemon's ``BATON_MODEL``. The call
-        is refused when neither sets one — baton never lets Claude Code's own
-        default decide.
+        A worker of this project runs on one explicitly chosen model when
+        nothing overrides it: the ``model`` argument, else the daemon's
+        ``BATON_MODEL``. The call is refused when neither sets one — baton
+        never lets Claude Code's own default decide.
 
         Args:
             project_path: The project directory to supervise. It must already
@@ -109,8 +109,9 @@ class BatonTools:
             initial_prompt: The task the first worker is launched with.
             session_name: The tmux session to use. Defaults to ``baton-``
                 followed by the title's slug.
-            model: The model every worker of this project runs on. Defaults
-                to the daemon's ``BATON_MODEL``.
+            model: The project's default model, which a worker runs on when
+                nothing overrides it. Defaults to the daemon's
+                ``BATON_MODEL``.
 
         Returns:
             The new project's id, its phase, the tmux session name, the
@@ -152,7 +153,7 @@ class BatonTools:
             meaningful order, and empty when baton supervises none. Each
             row carries the project's id, title, tmux session name,
             project directory, phase, the current worker's id or None,
-            the model its workers run on, and the time its state last
+            the project's default model, and the time its state last
             changed, as an ISO-8601 string.
         """
         return {
@@ -263,6 +264,7 @@ class BatonTools:
         message: str | None = None,
         next_prompt: str | None = None,
         delay_seconds: int | None = None,
+        model: str | None = None,
     ) -> dict[str, object]:
         """Report your lifecycle state. This is the only call baton acts on.
 
@@ -273,7 +275,8 @@ class BatonTools:
 
         - ``success``: the task is done and more work remains. Supply the next
           prompt; baton launches a fresh worker with it. Name a delay to hold
-          the handoff for that long first.
+          the handoff for that long first, and a model to launch that worker
+          on one other than the project's.
         - ``completed``: the whole project is done, not just this task.
         - ``failed``: you could not complete the task. Say what went wrong.
           Baton terminates you and launches a diagnosis worker to
@@ -295,10 +298,16 @@ class BatonTools:
         2. ``success`` requires a next prompt that is not blank. Every other
            state, ``running`` included, forbids one.
         3. ``success`` alone may carry a delay. It is a whole number of
-           seconds, not negative, and no larger than the daemon's configured
-           maximum, which defaults to 24 hours. Baton refuses the whole
-           report when a delay falls outside those bounds, rather than
-           trimming it to fit.
+           seconds, and not negative.
+        4. ``success`` alone may carry a model. It must not be blank, and it
+           governs the next worker only: the worker after that one runs on
+           the project's model again, as does every worker whose report
+           names no model.
+
+        A delay is also no larger than the daemon's configured maximum, which
+        defaults to 24 hours. Baton checks that after every payload rule, and
+        refuses the whole report when a delay exceeds it, rather than trimming
+        it to fit.
 
         ``success``, ``completed`` and ``failed`` are terminal, and a
         terminal report is final: baton refuses every report that follows
@@ -317,6 +326,11 @@ class BatonTools:
             delay_seconds: How long baton holds after terminating you, before
                 it launches the next worker. Allowed only with ``success``.
                 Omit it, or pass ``0``, to launch the next worker at once.
+            model: The model the next worker runs on, for that worker alone.
+                Allowed only with ``success``. Omit it to launch on the
+                project's model. Whatever ``claude --model`` accepts on this
+                machine is legal — an alias, or a model's full name, as
+                ``claude --help`` describes it.
 
         Returns:
             The project's phase after the report and the id of the worker
@@ -324,9 +338,10 @@ class BatonTools:
 
         Raises:
             ToolError: If the state is not one of the five, if the payload
-                breaks a rule, if the delay exceeds the daemon's configured
-                maximum, if worker_id is not the current worker of any
-                project baton holds, or if the project is already
+                breaks a rule, if the model is blank or is given with any
+                state but ``success``, if the delay exceeds the daemon's
+                configured maximum, if worker_id is not the current worker
+                of any project baton holds, or if the project is already
                 terminating.
         """
         try:
@@ -340,7 +355,7 @@ class BatonTools:
         try:
             supervisor = self._coordinator.supervisor_for_worker(worker_id)
             await supervisor.report_lifecycle(
-                worker_id, lifecycle_state, message, next_prompt, delay_seconds
+                worker_id, lifecycle_state, message, next_prompt, delay_seconds, model
             )
         except (CoordinatorError, SupervisorError) as exc:
             raise ToolError(str(exc)) from exc
@@ -360,12 +375,14 @@ class BatonTools:
 
         Returns:
             The project's phase, the current worker's id or None, the model
-            every worker of this project runs on, the moment a holding
-            project launches its next worker (None when no hold is pending),
-            the last lifecycle report as its state, message, next prompt and
-            delay (None when nothing has been reported), and the most recent
-            events, oldest first, each carrying its ISO-8601 timestamp, kind,
-            worker id, and payload.
+            a worker of this project runs on when nothing overrides it, the
+            moment a holding project launches its next worker (None when no
+            hold is pending), the last lifecycle report as its state,
+            message, next prompt, delay and model (None when nothing has
+            been reported), and the most recent events, oldest first, each
+            carrying its ISO-8601 timestamp, kind, worker id, and payload.
+            Each ``launch`` event among them names the model that worker
+            actually started on.
 
         Raises:
             ToolError: If baton holds no project with that id.
