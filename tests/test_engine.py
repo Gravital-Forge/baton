@@ -1396,7 +1396,7 @@ async def test_a_watchdog_tick_during_a_hold_recovers_nothing(
     await hold.wait_until_held()
     pane_reads = len(tmux.pane_info_calls)
 
-    await supervisor.check_worker()
+    await asyncio.wait_for(supervisor.check_worker(), timeout=1)
 
     assert len(tmux.pane_info_calls) == pane_reads
     assert supervisor.snapshot().phase == ProjectPhase.waiting
