@@ -262,6 +262,7 @@ class BatonTools:
         state: str,
         message: str | None = None,
         next_prompt: str | None = None,
+        delay_seconds: int | None = None,
     ) -> dict[str, object]:
         """Report your lifecycle state. This is the only call baton acts on.
 
@@ -271,7 +272,8 @@ class BatonTools:
         The states:
 
         - ``success``: the task is done and more work remains. Supply the next
-          prompt; baton launches a fresh worker with it.
+          prompt; baton launches a fresh worker with it. Name a delay to hold
+          the handoff for that long first.
         - ``completed``: the whole project is done, not just this task.
         - ``failed``: you could not complete the task. Say what went wrong.
           Baton terminates you and launches a diagnosis worker to
@@ -285,13 +287,17 @@ class BatonTools:
           otherwise.
 
         The payload rules, in the order baton checks them. The message rule is
-        checked first, so a report that breaks both is refused for the message
-        alone.
+        checked first, so a report that breaks more than one is refused for
+        the message alone.
 
         1. Every state except ``running`` requires a message that is not
            blank. ``running`` may carry one.
         2. ``success`` requires a next prompt that is not blank. Every other
            state, ``running`` included, forbids one.
+        3. ``success`` alone may carry a delay. It is a whole number of
+           seconds, not negative, and no larger than the daemon's configured
+           maximum, which defaults to 24 hours. A delay outside those bounds
+           refuses the report rather than being trimmed to fit.
 
         ``success``, ``completed`` and ``failed`` are terminal, and a
         terminal report is final: baton refuses every report that follows
@@ -307,6 +313,9 @@ class BatonTools:
             next_prompt: The prompt for the next worker, whose only context is
                 the project's files. Required for ``success`` and forbidden
                 otherwise.
+            delay_seconds: How long baton holds after terminating you, before
+                it launches the next worker. Allowed only with ``success``.
+                Omit it, or pass ``0``, to launch the next worker at once.
 
         Returns:
             The project's phase after the report and the id of the worker
@@ -314,7 +323,8 @@ class BatonTools:
 
         Raises:
             ToolError: If the state is not one of the five, if the payload
-                breaks a rule, if worker_id is not the current worker of any
+                breaks a rule, if the delay exceeds the daemon's configured
+                maximum, if worker_id is not the current worker of any
                 project baton holds, or if the project is already
                 terminating.
         """
@@ -329,7 +339,7 @@ class BatonTools:
         try:
             supervisor = self._coordinator.supervisor_for_worker(worker_id)
             await supervisor.report_lifecycle(
-                worker_id, lifecycle_state, message, next_prompt
+                worker_id, lifecycle_state, message, next_prompt, delay_seconds
             )
         except (CoordinatorError, SupervisorError) as exc:
             raise ToolError(str(exc)) from exc
@@ -349,10 +359,12 @@ class BatonTools:
 
         Returns:
             The project's phase, the current worker's id or None, the model
-            every worker of this project runs on, the last lifecycle report
-            as its state, message and next prompt (None when nothing has been
-            reported), and the most recent events, oldest first, each
-            carrying its ISO-8601 timestamp, kind, worker id, and payload.
+            every worker of this project runs on, the moment a holding
+            project launches its next worker (None when no hold is pending),
+            the last lifecycle report as its state, message, next prompt and
+            delay (None when nothing has been reported), and the most recent
+            events, oldest first, each carrying its ISO-8601 timestamp, kind,
+            worker id, and payload.
 
         Raises:
             ToolError: If baton holds no project with that id.
@@ -368,6 +380,9 @@ class BatonTools:
             "phase": state.phase.value,
             "worker_id": _worker_id(state),
             "model": state.model,
+            "resume_at": (
+                None if state.resume_at is None else state.resume_at.isoformat()
+            ),
             "last_report": None if last_report is None else last_report.to_dict(),
             "events": [event.to_dict() for event in events],
         }

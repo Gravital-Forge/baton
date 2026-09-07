@@ -299,6 +299,7 @@ async def test_report_lifecycle_converts_state_and_delegates_every_argument(
         state="success",
         message="task done",
         next_prompt="do the next thing",
+        delay_seconds=90,
     )
 
     assert stub.supervisor_for_worker_calls == ["worker-1"]
@@ -308,8 +309,33 @@ async def test_report_lifecycle_converts_state_and_delegates_every_argument(
             "state": LifecycleState.success,
             "message": "task done",
             "next_prompt": "do the next thing",
+            "delay_seconds": 90,
         }
     ]
+
+
+@pytest.mark.anyio
+async def test_report_lifecycle_omits_the_delay_by_default(
+    make_stub_coordinator: type[StubCoordinator],
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """A report naming no delay reaches the supervisor with None.
+
+    None is what launches the next worker at once, so the tool must
+    invent no value of its own here.
+    """
+    supervisor = make_stub_supervisor()
+    stub = make_stub_coordinator(supervisor=supervisor)
+    tools = BatonTools(stub)
+
+    await tools.report_lifecycle(
+        worker_id="worker-1",
+        state="success",
+        message="task done",
+        next_prompt="do the next thing",
+    )
+
+    assert supervisor.report_lifecycle_calls[0]["delay_seconds"] is None
 
 
 @pytest.mark.anyio
@@ -391,6 +417,38 @@ async def test_report_lifecycle_surfaces_a_supervisor_error_as_a_tool_error(
 
 
 @pytest.mark.anyio
+async def test_report_lifecycle_leaves_the_delay_cap_to_the_supervisor(
+    make_stub_coordinator: type[StubCoordinator],
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """An over-cap delay reaches the supervisor, whose refusal comes back whole.
+
+    The tool checks no bound of its own: the cap lives in the daemon's
+    configuration, which only the supervisor reads.
+    """
+    supervisor = make_stub_supervisor(
+        report_lifecycle_error=SupervisorError(
+            "a delay of 100000 seconds exceeds the maximum of 86400 seconds"
+        ),
+    )
+    stub = make_stub_coordinator(supervisor=supervisor)
+    tools = BatonTools(stub)
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.report_lifecycle(
+            worker_id="worker-1",
+            state="success",
+            message="done",
+            next_prompt="next task",
+            delay_seconds=100_000,
+        )
+
+    assert str(excinfo.value) == (
+        "a delay of 100000 seconds exceeds the maximum of 86400 seconds"
+    )
+
+
+@pytest.mark.anyio
 async def test_report_lifecycle_from_an_unrouted_worker_is_refused(
     make_stub_coordinator: type[StubCoordinator],
 ) -> None:
@@ -421,7 +479,7 @@ async def test_get_project_status_returns_phase_worker_last_report_and_events(
     """get_project_status returns the full project status.
 
     Asks for RECENT_EVENT_COUNT events, and returns the phase, worker id,
-    model, serialized last report, and serialized events.
+    model, resume moment, serialized last report, and serialized events.
     """
     report = LifecycleReport(
         state=LifecycleState.success, message="done", next_prompt="next task"
@@ -451,6 +509,7 @@ async def test_get_project_status_returns_phase_worker_last_report_and_events(
         "phase": "terminating",
         "worker_id": "worker-1",
         "model": "sonnet",
+        "resume_at": None,
         "last_report": {
             "state": "success",
             "message": "done",
@@ -469,10 +528,28 @@ async def test_get_project_status_returns_phase_worker_last_report_and_events(
 
 
 @pytest.mark.anyio
+async def test_get_project_status_returns_the_resume_moment_of_a_holding_project(
+    make_stub_coordinator: type[StubCoordinator],
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """A holding project reports its resume moment as an ISO-8601 string."""
+    state = ProjectState.new("a1b2c3d4", "Widget factory").updated(
+        phase=ProjectPhase.waiting, resume_at=datetime(2026, 2, 3, 4, 5, tzinfo=UTC)
+    )
+    stub = make_stub_coordinator(supervisor=make_stub_supervisor(state=state))
+    tools = BatonTools(stub)
+
+    result = await tools.get_project_status(project_id="a1b2c3d4")
+
+    assert result["phase"] == "waiting"
+    assert result["resume_at"] == "2026-02-03T04:05:00+00:00"
+
+
+@pytest.mark.anyio
 async def test_get_project_status_returns_none_for_every_absent_field(
     make_stub_coordinator: type[StubCoordinator],
 ) -> None:
-    """get_project_status maps an absent worker, model and report to None."""
+    """get_project_status maps an absent worker, model, hold and report to None."""
     stub = make_stub_coordinator()
     tools = BatonTools(stub)
 
@@ -480,6 +557,7 @@ async def test_get_project_status_returns_none_for_every_absent_field(
 
     assert result["worker_id"] is None
     assert result["model"] is None
+    assert result["resume_at"] is None
     assert result["last_report"] is None
     assert result["events"] == []
 

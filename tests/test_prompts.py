@@ -17,7 +17,8 @@ TOOL_SIGNATURES = [
     "resume_project(project_id, prompt)",
     "close_project(project_id)",
     "report_status(worker_id, message)",
-    "report_lifecycle(worker_id, state, message=None, next_prompt=None)",
+    "report_lifecycle(worker_id, state, message=None, next_prompt=None, "
+    "delay_seconds=None)",
     "get_project_status(project_id)",
 ]
 

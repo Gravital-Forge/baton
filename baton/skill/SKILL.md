@@ -26,7 +26,9 @@ your output is never a lifecycle signal — baton acts only on the tool call.
 The states:
 
 - **`success`** — the task is done and more work remains. Supply the next prompt;
-  `success` without one is not a valid report.
+  `success` without one is not a valid report. It may also name a delay: baton
+  terminates you as usual, holds for that long, and then launches the next
+  worker.
 - **`completed`** — the whole project is done, not just this task.
 - **`failed`** — you could not complete the task. Say what went wrong. Baton
   terminates you and launches a diagnosis worker to investigate.
@@ -47,6 +49,13 @@ your handoff. Baton ends your session shortly after.
 When you report `success`, write the next prompt for a fresh worker. That worker's
 only context is the project's files; it remembers nothing of this session. Give it
 enough task-specific detail that its next action is unambiguous.
+
+Pass `delay_seconds` when that worker should not start yet. Baton terminates you,
+waits that many seconds, and then launches it. The delay is a whole number of
+seconds, not negative, and no larger than the daemon's configured maximum, which
+defaults to 24 hours. A delay outside those bounds refuses the report rather than
+being trimmed to fit. Only `success` may carry a delay; every other state refuses
+one.
 
 ## Reconciliation
 
@@ -80,10 +89,11 @@ Your project's id is in the `BATON_PROJECT` environment variable. That id is wha
 These are yours:
 
 - `report_status(worker_id, message)` — records a milestone.
-- `report_lifecycle(worker_id, state, message=None, next_prompt=None)` — reports
-  your lifecycle state. The only call baton acts on.
+- `report_lifecycle(worker_id, state, message=None, next_prompt=None, delay_seconds=None)` —
+  reports your lifecycle state. The only call baton acts on.
 - `get_project_status(project_id)` — reads back a project's phase, current worker,
-  model, last lifecycle report, and recent events.
+  model, last lifecycle report, the moment a pending handoff delay ends, and
+  recent events.
 
 These belong to the setup agent, not to you:
 

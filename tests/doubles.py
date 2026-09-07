@@ -350,6 +350,7 @@ class StubSupervisor:
         state: LifecycleState,
         message: str | None = None,
         next_prompt: str | None = None,
+        delay_seconds: int | None = None,
     ) -> None:
         """Record the call, or raise the scripted error.
 
@@ -358,6 +359,7 @@ class StubSupervisor:
             state: The lifecycle state passed in.
             message: The message passed in.
             next_prompt: The next prompt passed in.
+            delay_seconds: The handoff delay passed in.
 
         Raises:
             SupervisorError: `report_lifecycle_error`, when one was
@@ -371,6 +373,7 @@ class StubSupervisor:
                 "state": state,
                 "message": message,
                 "next_prompt": next_prompt,
+                "delay_seconds": delay_seconds,
             }
         )
 
