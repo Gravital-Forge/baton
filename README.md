@@ -54,8 +54,9 @@ default except `BATON_MODEL`, and one configuration governs every project the da
 - `BATON_TERMINATION_TIMEOUT` — seconds baton waits after `SIGTERM` before it sends `SIGKILL`.
   Default `5`.
 - `BATON_POLL_INTERVAL` — seconds between polls of the worker panes. Default `2`.
-- `BATON_MODEL` — the model a project's workers run on when `initialize_project` names none of its
-  own. One of the two must name a model; baton never lets Claude Code's own default choose it.
+- `BATON_MODEL` — the model a project's workers run on by default, when `initialize_project` names
+  none of its own. One of the two must name a model; baton never lets Claude Code's own default
+  choose it.
 - `BATON_RECONCILIATION_TIMEOUT` — seconds baton waits for a live worker to answer a
   reconciliation request before giving up on it and starting recovery. Default `300`.
 - `BATON_RECOVERY_CAP` — the number of diagnosis workers baton launches in a row before it stops
@@ -141,9 +142,9 @@ phase `failed` when it cannot carry the work forward on its own. Read `get_proje
 phase and the recent events; the phase event that moved the project carries baton's reason.
 
 Call `resume_project` with the project's id and a prompt to carry the project on. It keeps its id,
-its title, its tmux session and its event log, and the new worker runs on the model the project was
-created with. Write that prompt as a whole context: the new worker remembers nothing of the workers
-before it.
+its title, its tmux session and its event log. The new worker runs on the model the project was
+created with, unless you name another for that one worker in the call. Write that prompt as a whole
+context: the new worker remembers nothing of the workers before it.
 
 Call `close_project` with the project's id to retire it for good. Baton gives any running worker the
 grace period, terminates it, kills the project's tmux session, and frees that session name for a new

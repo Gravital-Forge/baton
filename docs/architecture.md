@@ -90,9 +90,13 @@ than one is refused for the first of them:
 
 1. Every state except `running` requires a message that is not blank. `running` may carry one.
 2. `success` requires a next prompt that is not blank. Every other state forbids one.
-3. `success` alone may carry a delay. It is a whole number of seconds, not negative, and no larger
-   than `BATON_MAX_HANDOFF_DELAY` (see the readme). Baton refuses the whole report when a delay
-   falls outside those bounds, rather than trimming it to fit.
+3. `success` alone may carry a delay. It is a whole number of seconds, and not negative.
+4. `success` alone may carry a model, and it must not be blank. See "The normal loop" for what
+   naming one does.
+
+A delay is also no larger than `BATON_MAX_HANDOFF_DELAY` (see the readme). Baton checks that after
+every payload rule, and refuses the whole report when a delay exceeds it, rather than trimming it
+to fit.
 
 `success`, `completed`, and `failed` are terminal, and a terminal report is final: it moves the
 project to phase `terminating`. Baton refuses every report from the current worker while the
@@ -143,6 +147,21 @@ terminates the finished worker the usual way, then logs a `phase` event moving t
 worker, which is what keeps the watchdog off it: a dead pane held with a current worker is what
 recovery reads as a vanish (see "Recovery").
 
+A `success` report may also name the model the next worker runs on. Baton launches that one worker
+on the named model and leaves the project's own model alone. The worker after it runs on the
+project's model again, unless its own report names a model too. A report that names none launches
+on the project's model, and that model governs every launch nobody named one for: the first worker,
+a diagnosis worker, and a resumed worker whose `resume_project` call named none (see "Resuming and
+retiring"). A diagnosis worker never honors an override, whatever the report before it asked for:
+recovery has to run on a model known to work, and the model a worker was launched on may be what
+killed it.
+
+Baton holds no list of legal model names. It refuses a blank one and passes every other value
+through to `claude --model`, so the legal set is whatever the installed Claude Code accepts on this
+machine. A name Claude Code rejects makes the worker exit at launch, which baton reads as an
+ordinary vanish (see "Recovery"). Every `launch` event records the model its worker started on, so
+the event log says which model actually ran.
+
 A `running` report can arrive while the project is `blocked`, `reconciling`, `running`, or
 `recovering`. From `blocked` or from `reconciling` it returns the project to phase `running` — a
 `phase` event recording the move — and leaves the worker alive. From `running` or from `recovering`
@@ -152,7 +171,8 @@ baton records the report and moves nothing.
 
 A project that has stopped — phase `completed` or phase `failed` — has no worker of its own, and
 `resume_project` carries it on with a fresh one. The project keeps its id, its title, its session
-name, its path, its model and its event log; only the worker is new. The recovery attempt count
+name, its path, its model and its event log; only the worker is new. The call may name a model for
+that new worker alone, and "The normal loop" says what naming one means. The recovery attempt count
 resets and the last report is cleared, so a stopped worker's outcome is not read back as though it
 were the new worker's. A project in any other phase is refused: it still has a worker of its own,
 it is holding between two workers, or it has been closed.
@@ -290,16 +310,16 @@ reads the pane's own state rather than trusting a recorded process id.
 
 Baton puts the worker's id in the pane environment as `BATON_WORKER_ID`, and the project's id as
 `BATON_PROJECT`. The pane runs the worker's `launch.sh`, which `exec`s `claude` with the worker id
-as its `--session-id`, with the project's model as its `--model`, with `mcp.json` as its
-`--mcp-config`, and with the worker preamble appended to its system prompt. The preamble is what
-sends the worker to the installed skill, and what tells it to read both ids out of the environment:
-its own id goes on every report it makes, and the project's id is what `get_project_status` takes.
+as its `--session-id`, with the model chosen for that launch as its `--model`, with `mcp.json` as
+its `--mcp-config`, and with the worker preamble appended to its system prompt. The preamble is
+what sends the worker to the installed skill, and what tells it to read both ids out of the
+environment: its own id goes on every report it makes, and the project's id is what
+`get_project_status` takes.
 
-The model is chosen once, when `initialize_project` runs: the call's `model` argument, else the
-daemon's `BATON_MODEL`. Baton refuses to initialize when neither names one, so Claude Code's own
-default never decides. The chosen model goes into the project's `state.json` and launches every
-later worker of that project — the next worker after a `success`, a resumed worker, and a diagnosis
-worker alike.
+The project's model is set once, when `initialize_project` runs: the call's `model` argument, else
+the daemon's `BATON_MODEL`. Baton refuses to initialize when neither names one, so Claude Code's
+own default never decides. That model goes into the project's `state.json`, and it is the default
+each launch resolves the worker's model against (see "The normal loop").
 
 ## The state directory
 
@@ -322,8 +342,9 @@ directory per project:
 - `mcp.json` — the MCP client config a worker's Claude Code session is pointed at. Its content
   depends only on the daemon's host and port, so one daemon publishes one of them.
 - `state.json` — the project's id and title, its current phase, worker and last report, the tmux
-  session and pane its workers run in, the directory they work in, the model they run on, the
-  recovery attempt count, and the moment a pending hold ends.
+  session and pane its workers run in, the directory they work in, the model its workers run on by
+  default, the recovery attempt count, and the moment a pending hold ends. A last report that named
+  a model for the next worker carries that name here too.
 - `events.jsonl` — the append-only log `get_project_status` reads back for that project.
 - `workers/<worker id>/` — the `prompt.md` a worker was launched with, and the `launch.sh` that ran
   it. These files stay after the worker ends, as the record of what ran.
