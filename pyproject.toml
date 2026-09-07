@@ -16,6 +16,7 @@ dev = [
     "coverage>=7.15.1,<8.0.0",
     "pytest>=9.1.1,<10.0.0",
     "ruff>=0.16.5,<0.17.0",
+    "rumdl>=0.2.68,<0.3.0",
 ]
 
 [build-system]
@@ -61,6 +62,24 @@ builtins-ignorelist = ["id"]
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
+[tool.rumdl]
+line-length = 100
+cache = false
+extend-enable = ["MD060"]
+
+[tool.rumdl.MD013]
+line-length = 100
+code-blocks = false
+tables = true
+reflow = true
+reflow-mode = "normalize"
+
+[tool.rumdl.MD041]
+front-matter-title-pattern = "^(name|title):"
+
+[tool.rumdl.MD060]
+style = "aligned"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
@@ -79,6 +98,7 @@ configure = "./scripts/configure.sh"
 update = "./scripts/update.sh"
 hooks-run = "pre-commit run --all-files"
 hooks-update = "pre-commit autoupdate"
+fmt = "rumdl fmt ."
 [tool.poe.tasks.test]
 sequence = [
     { cmd = "coverage run -m pytest --showlocals" },
@@ -89,6 +109,7 @@ sequence = [
 sequence = [
     { cmd = "ruff check ." },
     { cmd = "ruff format --check ." },
+    { cmd = "rumdl check ." },
 ]
 
 [tool.poe.tasks.test-full]
