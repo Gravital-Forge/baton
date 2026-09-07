@@ -368,7 +368,12 @@ class BatonTools:
         try:
             supervisor = self._coordinator.supervisor_for_worker(worker_id)
             await supervisor.report_lifecycle(
-                worker_id, lifecycle_state, message, next_prompt, delay_seconds, model
+                worker_id,
+                lifecycle_state,
+                message=message,
+                next_prompt=next_prompt,
+                delay_seconds=delay_seconds,
+                model=model,
             )
         except (CoordinatorError, SupervisorError) as exc:
             raise ToolError(str(exc)) from exc

@@ -3335,6 +3335,22 @@ async def test_resume_launches_the_resumed_worker_on_the_model_it_names(
 
 
 @pytest.mark.anyio
+async def test_resume_with_a_padded_model_argument_launches_on_it_stripped(
+    supervisor: Supervisor, launcher: FakeLauncher, project_dir: Path
+) -> None:
+    """A padded model argument reaches the launcher stripped."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.completed, message="all done"
+    )
+    await supervisor.wait_for_finish()
+
+    await supervisor.resume("carry on", model="  fable  ")
+
+    assert launcher.launches[1]["model"] == "fable"
+
+
+@pytest.mark.anyio
 async def test_a_resume_model_leaves_the_projects_own_model_alone(
     store: StateStore, supervisor: Supervisor, project_dir: Path
 ) -> None:

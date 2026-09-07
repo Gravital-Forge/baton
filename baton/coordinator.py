@@ -235,7 +235,7 @@ class Coordinator:
             TmuxError: If creating the session or launching the worker
                 fails.
         """
-        return await self.supervisor(project_id).resume(prompt, model)
+        return await self.supervisor(project_id).resume(prompt, model=model)
 
     async def close(self, project_id: str) -> ProjectState:
         """Retire a project, terminating any worker it still has.

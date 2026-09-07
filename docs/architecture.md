@@ -152,8 +152,8 @@ on the named model and leaves the project's own model alone, so the worker after
 project's model again unless its own report names a model too. The project's model governs every
 launch nobody named one for: the first worker, a handoff whose report named none, and a resumed
 worker whose `resume_project` call named none (see "Resuming and retiring"). A diagnosis worker
-never honors an override, whatever the report before it asked for: recovery has to run on a model
-known to work, and the model a worker was launched on may be what killed it.
+runs on the project's model, whatever the worker it replaces was launched on. Recovery has to
+run on a model known to work, and the model that worker ran on may be what killed it.
 
 Baton holds no list of legal model names. It refuses a blank one and passes every other value
 through to `claude --model`, so the legal set is whatever the installed Claude Code accepts on this
