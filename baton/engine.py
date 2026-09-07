@@ -185,9 +185,8 @@ class Supervisor:
             The committed ProjectState, in phase running.
 
         Raises:
-            SupervisorError: If the project still has a worker of its own
-                — any phase but completed or failed — or if prompt is
-                blank.
+            SupervisorError: If the project has not stopped — any phase
+                but completed or failed — or if prompt is blank.
             TmuxError: If creating the session or launching the worker
                 fails.
         """

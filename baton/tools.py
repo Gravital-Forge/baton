@@ -287,8 +287,8 @@ class BatonTools:
           otherwise.
 
         The payload rules, in the order baton checks them. The message rule is
-        checked first, so a report that breaks more than one is refused for
-        the message alone.
+        checked first, and a report that breaks more than one is refused for
+        the first of them.
 
         1. Every state except ``running`` requires a message that is not
            blank. ``running`` may carry one.

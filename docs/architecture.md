@@ -85,7 +85,7 @@ on: prose in a worker's output is never a signal.
   resumes work from phase `blocked`. Baton returns the project to `running` from `blocked` or from
   `reconciling`, and moves nothing otherwise (see "Restart reconciliation" for the request).
 
-Baton checks a report's payload against three rules, in this order, so a report that breaks more
+Baton checks a report's payload against these rules, in this order, so a report that breaks more
 than one is refused for the first of them:
 
 1. Every state except `running` requires a message that is not blank. `running` may carry one.
