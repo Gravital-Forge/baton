@@ -1215,6 +1215,41 @@ async def test_a_delayed_success_moves_through_waiting_to_running(
 
 
 @pytest.mark.anyio
+async def test_a_delayed_success_sets_its_deadline_that_many_seconds_ahead(
+    supervisor: Supervisor,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The committed deadline is the delay read as seconds, and as nothing else.
+
+    Every other deadline assertion in this suite compares the committed
+    moment against one the test itself supplied, so a delay read in the
+    wrong unit would move both together. This one brackets the deadline
+    against the clock either side of the report.
+    """
+    hold = _hold_the_sleep(monkeypatch)
+    result = await supervisor.initialize(project_dir, "start here")
+
+    before = datetime.now(UTC)
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        delay_seconds=60,
+    )
+    await hold.wait_until_held()
+    after = datetime.now(UTC)
+
+    deadline = supervisor.snapshot().resume_at
+    assert deadline is not None
+    assert before + timedelta(seconds=60) <= deadline <= after + timedelta(seconds=60)
+
+    hold.release()
+    await supervisor.wait_for_finish()
+
+
+@pytest.mark.anyio
 async def test_a_delayed_success_records_the_phase_move_into_waiting(
     supervisor: Supervisor,
     project_dir: Path,
