@@ -7,6 +7,7 @@ it.
 """
 
 import asyncio
+import contextlib
 import logging
 import signal
 import time
@@ -233,6 +234,11 @@ class Supervisor:
         finish at the next startup, relaunching a project the operator
         had retired.
 
+        A project in waiting is holding between two workers, so its hold
+        is cancelled before the lock is taken and before the no-worker
+        shortcut retires it. Without that cancel, the hold would wake
+        after the retirement and launch a worker into a closed project.
+
         Returns:
             The committed ProjectState, in phase closed.
 
@@ -245,6 +251,9 @@ class Supervisor:
                 rather than terminating, so a later close can still
                 retire it.
         """
+        if self._state.phase == ProjectPhase.waiting:
+            await self._cancel_hold()
+
         async with self._lock:
             if self._state.phase == ProjectPhase.terminating:
                 raise SupervisorError(
@@ -483,9 +492,10 @@ class Supervisor:
         recovering, or reconciling has a worker whose current lifecycle
         state baton no longer knows, so its pane is asked to report it. A
         project in terminating has a finish that never ran to completion,
-        so that finish is resumed. A project in uninitialized, completed,
-        failed, or closed has no worker to reconcile with and is left
-        alone.
+        so that finish is resumed. A project in waiting has no worker
+        either, but is still owed a hold, so the remainder of that hold
+        is resumed. A project in uninitialized, completed, failed, or
+        closed has no worker to reconcile with and is left alone.
 
         Raises:
             TmuxError: If sending the reconciliation request to the pane
@@ -493,6 +503,9 @@ class Supervisor:
                 goes on to serve every other one.
         """
         async with self._lock:
+            if self._state.phase == ProjectPhase.waiting:
+                self._finish_task = asyncio.create_task(self._resume_hold())
+                return
             worker = self._state.worker
             if worker is None:
                 return
@@ -526,11 +539,27 @@ class Supervisor:
             )
 
     async def shutdown(self) -> None:
-        """Drain any finish still pending.
+        """Cancel a pending hold, or drain any other finish still pending.
 
         Safe to call whether or not a finish is pending. The coordinator
         stops the watchdog; a supervisor has none of its own.
+
+        The flag is set before the phase is read, so a finish that has
+        not yet committed waiting stops there rather than entering its
+        hold. A project already holding is cancelled instead of drained,
+        which would otherwise block the daemon for the length of the
+        delay; its deadline is persisted, so the next start resumes it.
+
+        The lock covers the phase read alone. A finish still in its grace
+        period takes that same lock to commit waiting, so a drain that
+        held it would deadlock.
         """
+        self._shutting_down = True
+        async with self._lock:
+            phase = self._state.phase
+        if phase == ProjectPhase.waiting:
+            await self._cancel_hold()
+            return
         await self.wait_for_finish()
 
     def _commit(self, new_state: ProjectState, reason: str | None = None) -> None:
@@ -705,6 +734,59 @@ class Supervisor:
                     f"report failed: {exc}",
                 )
             raise
+
+    async def _resume_hold(self) -> None:
+        """Wait out a persisted hold, then route the report that began it.
+
+        The counterpart to _finish for a project found in waiting at
+        startup: its worker is already terminated and its deadline
+        already committed, so only the wait and the route are left. A
+        deadline already past routes at once.
+
+        A failure here is logged where _finish re-raises its own, because
+        nothing awaits this task: a shutdown cancels it rather than
+        draining it, so wait_for_finish is never reached.
+        """
+        report = self._state.last_report
+        await _sleep_until(self._state.resume_at)
+        try:
+            async with self._lock:
+                self._route(report)
+        except Exception as exc:  # noqa: BLE001 - nothing awaits this task
+            _log.exception("the handoff after a %r report failed", report.state.value)
+            async with self._lock:
+                self._commit(
+                    self._state.updated(
+                        phase=ProjectPhase.failed, worker=None, resume_at=None
+                    ),
+                    reason=f"the handoff after a {report.state.value!r} "
+                    f"report failed: {exc}",
+                )
+
+    async def _cancel_hold(self) -> None:
+        """Cancel a pending hold, so nothing it would have done still happens.
+
+        Called with the lock released, and safe to call whether or not a
+        hold is scheduled: a project restored in waiting has one only
+        once reconcile has run.
+
+        The handle is cleared afterwards because wait_for_finish awaits
+        it, and awaiting a cancelled task re-raises the cancellation at
+        whoever awaits it. Left set, a close during a hold would make the
+        shutdown that follows raise, which the coordinator records as a
+        drain failure for an ordinary close.
+        """
+        if self._finish_task is None:
+            return
+        # A cancel lands only at an await point, and _route runs
+        # synchronously from the launch through the commit that records
+        # it. So the cancel falls either before the hold takes the lock
+        # or after that commit, never between a launched worker and
+        # baton's record of it.
+        self._finish_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._finish_task
+        self._finish_task = None
 
     async def _finish_abnormal(self, worker: WorkerRecord, reason: str) -> None:
         """Terminate a worker baton gave up on, then recover, with no grace period.

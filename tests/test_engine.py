@@ -133,6 +133,48 @@ def _persist_project(
     return worker
 
 
+def _persist_waiting_project(
+    store: StateStore,
+    project_id: str,
+    project_dir: Path,
+    *,
+    resume_at: datetime,
+    next_prompt: str,
+) -> None:
+    """Save a persisted ProjectState mid-hold, for a Supervisor built after.
+
+    A holding project has no worker: the finish that entered the hold
+    terminated it and cleared it. Its last report is the success that
+    asked for the delay, and carries the prompt a resumed hold launches
+    from.
+
+    Args:
+        store: The store to save the state to.
+        project_id: The id the persisted state carries.
+        project_dir: The project directory the persisted state points to;
+            its resolved form is what is saved.
+        resume_at: The moment the persisted hold ends.
+        next_prompt: The prompt the persisted report hands on.
+    """
+    store.save(
+        ProjectState.new(project_id, TITLE).updated(
+            phase=ProjectPhase.waiting,
+            project_path=project_dir.resolve(),
+            session_name=SESSION_NAME,
+            pane_target=PANE_TARGET,
+            worker=None,
+            model="sonnet",
+            last_report=LifecycleReport(
+                state=LifecycleState.success,
+                message="phase one done",
+                next_prompt=next_prompt,
+                delay_seconds=60,
+            ),
+            resume_at=resume_at,
+        )
+    )
+
+
 def _persisted_supervisor(
     config: BatonConfig, store: StateStore, tmux: FakeTmux, launcher: FakeLauncher
 ) -> Supervisor:
@@ -1468,17 +1510,22 @@ async def test_a_report_arriving_during_a_hold_is_refused(
 
 
 @pytest.mark.anyio
-async def test_a_finish_that_sees_a_shutdown_stops_in_waiting_without_holding(
+async def test_a_shutdown_in_the_grace_period_of_a_delayed_finish_stops_in_waiting(
     store: StateStore,
     supervisor: Supervisor,
     launcher: FakeLauncher,
     project_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A shutdown reaching a delayed finish leaves it in waiting, never sleeping."""
+    """A shutdown reaching a delayed finish leaves it in waiting, never sleeping.
+
+    The shutdown drains this finish rather than cancelling it, because
+    the phase it reads is still terminating. A drain holding the lock
+    would deadlock against the finish's own commit into waiting, so the
+    wait bounds the call rather than letting it hang the run.
+    """
     hold = _hold_the_sleep(monkeypatch)
     result = await supervisor.initialize(project_dir, "start here")
-
     await supervisor.report_lifecycle(
         result.worker.worker_id,
         LifecycleState.success,
@@ -1486,8 +1533,8 @@ async def test_a_finish_that_sees_a_shutdown_stops_in_waiting_without_holding(
         next_prompt="phase two",
         delay_seconds=60,
     )
-    monkeypatch.setattr(supervisor, "_shutting_down", True)
-    await supervisor.wait_for_finish()
+
+    await asyncio.wait_for(supervisor.shutdown(), timeout=1)
 
     assert hold.deadlines == []
     for state in _persisted_and_live(store, supervisor):
@@ -2510,6 +2557,179 @@ async def test_reconcile_in_terminating_without_a_terminal_last_report_recovers(
 
 
 @pytest.mark.anyio
+async def test_a_resumed_finish_after_a_delayed_success_still_holds(
+    config: BatonConfig,
+    store: StateStore,
+    make_tmux: type[FakeTmux],
+    launcher: FakeLauncher,
+    project_id: str,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finish resumed at startup honours the delay its report carried.
+
+    The report is read back out of state.json, so a delay dropped in the
+    decode would launch the next worker at once instead of holding.
+    """
+    hold = _hold_the_sleep(monkeypatch)
+    tmux = make_tmux(pane_infos=[PaneInfo(dead=False, pid=1)])
+    last_report = LifecycleReport(
+        state=LifecycleState.success,
+        message="done",
+        next_prompt="do the next thing",
+        delay_seconds=60,
+    )
+    _persist_project(
+        store,
+        project_id,
+        project_dir,
+        phase=ProjectPhase.terminating,
+        last_report=last_report,
+    )
+    supervisor = _persisted_supervisor(config, store, tmux, launcher)
+
+    await supervisor.reconcile()
+    await hold.wait_until_held()
+
+    assert supervisor.snapshot().phase == ProjectPhase.waiting
+    assert supervisor.snapshot().resume_at is not None
+    assert launcher.launches == []
+
+    hold.release()
+    await supervisor.wait_for_finish()
+
+    assert [launch["prompt"] for launch in launcher.launches] == ["do the next thing"]
+
+
+@pytest.mark.anyio
+async def test_reconcile_in_waiting_sleeps_to_the_persisted_deadline(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_id: str,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reconcile resumes a hold, though the holding project has no worker."""
+    hold = _hold_the_sleep(monkeypatch)
+    resume_at = datetime.now(UTC) + timedelta(seconds=60)
+    _persist_waiting_project(
+        store, project_id, project_dir, resume_at=resume_at, next_prompt="phase two"
+    )
+    supervisor = _persisted_supervisor(config, store, tmux, launcher)
+
+    await supervisor.reconcile()
+    await hold.wait_until_held()
+
+    assert hold.deadlines == [resume_at]
+    assert supervisor.snapshot().phase == ProjectPhase.waiting
+    assert launcher.launches == []
+
+    hold.release()
+    await supervisor.wait_for_finish()
+
+
+@pytest.mark.anyio
+async def test_a_resumed_hold_launches_the_next_worker_when_it_is_released(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_id: str,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hold resumed at startup hands on to the persisted report's next prompt."""
+    hold = _hold_the_sleep(monkeypatch)
+    _persist_waiting_project(
+        store,
+        project_id,
+        project_dir,
+        resume_at=datetime.now(UTC) + timedelta(seconds=60),
+        next_prompt="phase two",
+    )
+    supervisor = _persisted_supervisor(config, store, tmux, launcher)
+    await supervisor.reconcile()
+    await hold.wait_until_held()
+
+    hold.release()
+    await supervisor.wait_for_finish()
+
+    assert [launch["prompt"] for launch in launcher.launches] == ["phase two"]
+    for state in _persisted_and_live(store, supervisor):
+        assert state.phase == ProjectPhase.running
+        assert state.resume_at is None
+
+
+@pytest.mark.anyio
+async def test_reconcile_in_waiting_past_its_deadline_launches_at_once(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_id: str,
+    project_dir: Path,
+) -> None:
+    """A hold whose moment has already passed launches without waiting."""
+    _persist_waiting_project(
+        store,
+        project_id,
+        project_dir,
+        resume_at=datetime.now(UTC) - timedelta(seconds=30),
+        next_prompt="phase two",
+    )
+    supervisor = _persisted_supervisor(config, store, tmux, launcher)
+
+    await supervisor.reconcile()
+    await asyncio.wait_for(supervisor.wait_for_finish(), timeout=1)
+
+    assert [launch["prompt"] for launch in launcher.launches] == ["phase two"]
+    assert supervisor.snapshot().phase == ProjectPhase.running
+
+
+@pytest.mark.anyio
+async def test_a_route_that_fails_inside_a_resumed_hold_ends_in_failed(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    make_launcher: Callable[..., FakeLauncher],
+    project_id: str,
+    project_dir: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A launch that fails in a resumed hold lands in failed, raising at nobody.
+
+    Nothing awaits the resumed hold, so its failure is logged where the
+    finish path would re-raise it.
+    """
+    launcher = make_launcher(launch_errors=[TmuxError("session gone")])
+    _persist_waiting_project(
+        store,
+        project_id,
+        project_dir,
+        resume_at=datetime.now(UTC) - timedelta(seconds=30),
+        next_prompt="phase two",
+    )
+    supervisor = _persisted_supervisor(config, store, tmux, launcher)
+
+    with caplog.at_level(logging.ERROR, logger="baton.engine"):
+        await supervisor.reconcile()
+        await asyncio.wait_for(supervisor.wait_for_finish(), timeout=1)
+
+    for state in _persisted_and_live(store, supervisor):
+        assert state.phase == ProjectPhase.failed
+        assert state.resume_at is None
+    phase_event = supervisor.recent_events(count=20)[-1]
+    assert phase_event.payload["reason"] == (
+        "the handoff after a 'success' report failed: session gone"
+    )
+    records = [record for record in caplog.records if record.name == "baton.engine"]
+    assert len(records) == 1
+    assert records[0].exc_info is not None
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize("phase", [ProjectPhase.completed, ProjectPhase.failed])
 async def test_reconcile_in_a_terminal_phase_sends_nothing(
     config: BatonConfig,
@@ -2653,6 +2873,70 @@ async def test_shutdown_with_no_pending_finish_returns(supervisor: Supervisor) -
 
 
 @pytest.mark.anyio
+async def test_shutdown_during_a_hold_cancels_it_and_launches_nothing(
+    store: StateStore,
+    supervisor: Supervisor,
+    launcher: FakeLauncher,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown cancels a hold rather than waiting it out, leaving it to resume.
+
+    The wait bounds the call: a shutdown that drained the hold instead
+    would block the daemon for the length of the delay.
+    """
+    hold = _hold_the_sleep(monkeypatch)
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        delay_seconds=60,
+    )
+    await hold.wait_until_held()
+
+    await asyncio.wait_for(supervisor.shutdown(), timeout=1)
+
+    hold.release()
+    await asyncio.wait_for(supervisor.wait_for_finish(), timeout=1)
+
+    assert len(launcher.launches) == 1
+    for state in _persisted_and_live(store, supervisor):
+        assert state.phase == ProjectPhase.waiting
+        assert state.resume_at is not None
+
+
+@pytest.mark.anyio
+async def test_a_shutdown_after_a_close_during_a_hold_returns_cleanly(
+    supervisor: Supervisor,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled hold is cleared, so the shutdown that follows raises nothing.
+
+    Awaiting a cancelled task re-raises its cancellation at whoever
+    awaits it, which the coordinator would record as a drain failure for
+    an ordinary close.
+    """
+    hold = _hold_the_sleep(monkeypatch)
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        delay_seconds=60,
+    )
+    await hold.wait_until_held()
+    await supervisor.close()
+
+    await asyncio.wait_for(supervisor.shutdown(), timeout=1)
+
+    assert supervisor.snapshot().phase == ProjectPhase.closed
+
+
+@pytest.mark.anyio
 async def test_resume_launches_a_worker_on_a_completed_project(
     store: StateStore,
     supervisor: Supervisor,
@@ -2773,6 +3057,7 @@ async def test_resume_resets_the_recovery_attempts(
         ProjectPhase.recovering,
         ProjectPhase.reconciling,
         ProjectPhase.blocked,
+        ProjectPhase.waiting,
         ProjectPhase.terminating,
         ProjectPhase.closed,
     ],
@@ -2963,6 +3248,63 @@ async def test_close_with_no_worker_signals_nothing_and_retires(
     assert state.phase == ProjectPhase.closed
     assert tmux.kill_session_calls == [SESSION_NAME]
     assert tmux.signals == []
+
+
+@pytest.mark.anyio
+async def test_close_during_a_hold_retires_the_project_and_launches_nothing(
+    supervisor: Supervisor,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A close during a hold cancels it, launching nothing into a retired project."""
+    hold = _hold_the_sleep(monkeypatch)
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        delay_seconds=60,
+    )
+    await hold.wait_until_held()
+
+    state = await asyncio.wait_for(supervisor.close(), timeout=1)
+
+    hold.release()
+    await asyncio.wait_for(supervisor.wait_for_finish(), timeout=1)
+
+    assert state.phase == ProjectPhase.closed
+    assert state.resume_at is None
+    assert len(launcher.launches) == 1
+    assert tmux.kill_session_calls == [SESSION_NAME]
+
+
+@pytest.mark.anyio
+async def test_close_in_waiting_with_no_hold_scheduled_retires_the_project(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_id: str,
+    project_dir: Path,
+) -> None:
+    """A project restored mid-hold is retired by a close that beats its reconcile."""
+    _persist_waiting_project(
+        store,
+        project_id,
+        project_dir,
+        resume_at=datetime.now(UTC) + timedelta(seconds=60),
+        next_prompt="phase two",
+    )
+    supervisor = _persisted_supervisor(config, store, tmux, launcher)
+
+    state = await supervisor.close()
+
+    assert state.phase == ProjectPhase.closed
+    assert state.resume_at is None
+    assert launcher.launches == []
 
 
 @pytest.mark.anyio
