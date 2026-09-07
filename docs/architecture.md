@@ -135,7 +135,8 @@ with the prompt the last one wrote — a `launch` event, and a `phase` event bac
 "Recovery"). A `blocked` report skips termination: it moves the project to phase `blocked` and
 leaves the worker alive for the human who must unblock it.
 
-A `success` report may name a delay, and baton holds that long between the two workers. It
+A `success` report may name a delay, and baton holds that long between the two workers. A delay of
+`0` holds nothing, and that handoff runs exactly as an undelayed one does. Otherwise baton
 terminates the finished worker the usual way, then logs a `phase` event moving the project to
 `waiting`, whose reason carries the delay and the moment the hold ends. The `launch` and the
 `phase` event back to `running` come once that moment has passed. A holding project has no current
@@ -153,14 +154,16 @@ A project that has stopped — phase `completed` or phase `failed` — has no wo
 `resume_project` carries it on with a fresh one. The project keeps its id, its title, its session
 name, its path, its model and its event log; only the worker is new. The recovery attempt count
 resets and the last report is cleared, so a stopped worker's outcome is not read back as though it
-were the new worker's. A project in any other phase is refused: it still has a worker of its own, or
-it has been closed.
+were the new worker's. A project in any other phase is refused: it still has a worker of its own,
+it is holding between two workers, or it has been closed.
 
 `close_project` retires a project for good. It moves the project to phase `terminating`, waits the
 grace period, terminates the worker, kills the project's tmux session, and commits phase `closed`
-with no worker. A project with no worker skips straight to the kill and the commit. The kill is
-guarded by `has_session`, because an absent session is an ordinary state — a tmux server restart, or
-an operator who killed it — and killing a session that is not there raises.
+with no worker. A project with no worker skips straight to the kill and the commit. A project
+holding between two workers has its pending hold cancelled first, before the lock and before that
+shortcut: a hold left running would wake after the retirement and launch a worker into a closed
+project. The kill is guarded by `has_session`, because an absent session is an ordinary state — a
+tmux server restart, or an operator who killed it — and killing a session that is not there raises.
 
 `close` holds the supervisor's lock in two stretches, the way a finish does, with the grace period
 and the termination poll between them. A lock held across both would stall the watchdog:
