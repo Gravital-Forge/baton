@@ -515,6 +515,7 @@ async def test_get_project_status_returns_phase_worker_last_report_and_events(
             "message": "done",
             "next_prompt": "next task",
             "delay_seconds": None,
+            "model": None,
         },
         "events": [
             {

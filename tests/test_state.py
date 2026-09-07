@@ -59,6 +59,7 @@ def populated_state(tmp_path: Path) -> ProjectState:
         message="did the thing",
         next_prompt="do the next thing",
         delay_seconds=1800,
+        model="opus",
     )
     return ProjectState(
         project_id="a1b2c3d4",
@@ -111,6 +112,7 @@ def test_round_trip_fully_populated(
     assert isinstance(loaded.last_report, LifecycleReport)
     assert isinstance(loaded.last_report.state, LifecycleState)
     assert loaded.last_report.delay_seconds == 1800
+    assert loaded.last_report.model == "opus"
     assert loaded.resume_at == populated_state.resume_at
     assert loaded.resume_at.tzinfo == UTC
 
@@ -151,6 +153,7 @@ def test_round_trip_with_optionals_none(store: StateStore, tmp_path: Path) -> No
     assert loaded.last_report is not None
     assert loaded.last_report.next_prompt is None
     assert loaded.last_report.delay_seconds is None
+    assert loaded.last_report.model is None
     assert loaded.model is None
     assert loaded.resume_at is None
 
@@ -239,10 +242,10 @@ def test_load_revalidates_a_persisted_report(store: StateStore) -> None:
     assert "requires a message" in str(excinfo.value)
 
 
-def test_load_reads_a_state_file_missing_resume_at_and_delay(
+def test_load_reads_a_state_file_missing_resume_at_delay_and_model(
     store: StateStore,
 ) -> None:
-    """A state.json missing resume_at and delay_seconds loads both as None."""
+    """A state.json missing resume_at, the delay, and the model loads None for each."""
     raw = {
         **GOOD_STATE_JSON,
         "last_report": {
@@ -257,6 +260,7 @@ def test_load_reads_a_state_file_missing_resume_at_and_delay(
 
     assert loaded.resume_at is None
     assert loaded.last_report.delay_seconds is None
+    assert loaded.last_report.model is None
 
 
 def test_round_trip_with_no_worker_and_no_report(store: StateStore) -> None:
@@ -334,11 +338,13 @@ def test_on_disk_json_has_pinned_shape(
         "message",
         "next_prompt",
         "delay_seconds",
+        "model",
     ]
     assert raw["last_report"]["state"] == "success"
     assert raw["last_report"]["message"] == "did the thing"
     assert raw["last_report"]["next_prompt"] == "do the next thing"
     assert raw["last_report"]["delay_seconds"] == 1800
+    assert raw["last_report"]["model"] == "opus"
     assert raw["model"] == "sonnet"
     assert raw["recovery_attempts"] == 2
     assert raw["resume_at"] == populated_state.resume_at.isoformat()
