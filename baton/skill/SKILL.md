@@ -28,7 +28,7 @@ The states:
 - **`success`** — the task is done and more work remains. Supply the next prompt;
   `success` without one is not a valid report. It may also name a delay: baton
   terminates you as usual, holds for that long, and then launches the next
-  worker. It may name the model that worker runs on, too.
+  worker. It may name the model the next worker runs on, too.
 - **`completed`** — the whole project is done, not just this task.
 - **`failed`** — you could not complete the task. Say what went wrong. Baton
   terminates you and launches a diagnosis worker to investigate.

@@ -148,13 +148,12 @@ worker, which is what keeps the watchdog off it: a dead pane held with a current
 recovery reads as a vanish (see "Recovery").
 
 A `success` report may also name the model the next worker runs on. Baton launches that one worker
-on the named model and leaves the project's own model alone. The worker after it runs on the
-project's model again, unless its own report names a model too. A report that names none launches
-on the project's model, and that model governs every launch nobody named one for: the first worker,
-a diagnosis worker, and a resumed worker whose `resume_project` call named none (see "Resuming and
-retiring"). A diagnosis worker never honors an override, whatever the report before it asked for:
-recovery has to run on a model known to work, and the model a worker was launched on may be what
-killed it.
+on the named model and leaves the project's own model alone, so the worker after it runs on the
+project's model again unless its own report names a model too. The project's model governs every
+launch nobody named one for: the first worker, a handoff whose report named none, and a resumed
+worker whose `resume_project` call named none (see "Resuming and retiring"). A diagnosis worker
+never honors an override, whatever the report before it asked for: recovery has to run on a model
+known to work, and the model a worker was launched on may be what killed it.
 
 Baton holds no list of legal model names. It refuses a blank one and passes every other value
 through to `claude --model`, so the legal set is whatever the installed Claude Code accepts on this
@@ -344,7 +343,7 @@ directory per project:
 - `state.json` — the project's id and title, its current phase, worker and last report, the tmux
   session and pane its workers run in, the directory they work in, the model its workers run on by
   default, the recovery attempt count, and the moment a pending hold ends. A last report that named
-  a model for the next worker carries that name here too.
+  a model for the next worker carries that name here too (see "The normal loop").
 - `events.jsonl` — the append-only log `get_project_status` reads back for that project.
 - `workers/<worker id>/` — the `prompt.md` a worker was launched with, and the `launch.sh` that ran
   it. These files stay after the worker ends, as the record of what ran.
