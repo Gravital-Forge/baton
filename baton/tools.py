@@ -96,10 +96,11 @@ class BatonTools:
         another. The title and the initial prompt must not be blank, and
         neither may a session name when you give one.
 
-        A worker of this project runs on one explicitly chosen model when
-        nothing overrides it: the ``model`` argument, else the daemon's
-        ``BATON_MODEL``. The call is refused when neither sets one — baton
-        never lets Claude Code's own default decide.
+        The project runs on one explicitly chosen model: the ``model``
+        argument, else the daemon's ``BATON_MODEL``. The call is refused when
+        neither sets one — baton never lets Claude Code's own default decide.
+        It is the project's default: ``report_lifecycle`` says how a worker
+        names another model for the worker after it.
 
         Args:
             project_path: The project directory to supervise. It must already
