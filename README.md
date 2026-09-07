@@ -57,10 +57,10 @@ default except `BATON_MODEL`, and one configuration governs every project the da
 - `BATON_MODEL` — the model a project's workers run on by default, when `initialize_project` names
   none of its own. One of the two must name a model; baton never lets Claude Code's own default
   choose it.
-- `BATON_RECONCILIATION_TIMEOUT` — seconds baton waits for a live worker to answer a
-  reconciliation request before giving up on it and starting recovery. Default `300`.
-- `BATON_RECOVERY_CAP` — the number of diagnosis workers baton launches in a row before it stops
-  and holds that project in phase `failed`. Default `3`.
+- `BATON_RECONCILIATION_TIMEOUT` — seconds baton waits for a live worker to answer a reconciliation
+  request before giving up on it and starting recovery. Default `300`.
+- `BATON_RECOVERY_CAP` — the number of diagnosis workers baton launches in a row before it stops and
+  holds that project in phase `failed`. Default `3`.
 - `BATON_MAX_HANDOFF_DELAY` — the largest delay, in seconds, a `success` report may ask baton to
   hold for before it launches the next worker. Default `86400`, which is 24 hours. Baton refuses a
   report that asks for more.
@@ -104,9 +104,9 @@ session: kill it, or pass a `session_name` of your own.
 ## Watch the work
 
 Each project runs in a tmux session of its own, named `baton-` followed by the title's slug. See
-"Project identity" in [`docs/architecture.md`](docs/architecture.md) for how a title becomes a
-slug. Pass `session_name` to `initialize_project` to choose the name yourself. `list_projects`
-gives you every project's session name, along with its id, its phase, and its current worker.
+"Project identity" in [`docs/architecture.md`](docs/architecture.md) for how a title becomes a slug.
+Pass `session_name` to `initialize_project` to choose the name yourself. `list_projects` gives you
+every project's session name, along with its id, its phase, and its current worker.
 
 Attach to a session like this:
 
@@ -121,11 +121,11 @@ The `=` is tmux's exact-match prefix. The worker runs in the pane `baton-<slug>:
 A restarted daemon carries each project forward on its own:
 
 - It reconciles with a worker still alive from before: it types a request into the worker's pane
-  asking for its current state, and waits a bounded time — `BATON_RECONCILIATION_TIMEOUT` — for
-  the answer.
+  asking for its current state, and waits a bounded time — `BATON_RECONCILIATION_TIMEOUT` — for the
+  answer.
 - It resumes a handoff it was in the middle of when it stopped.
-- It waits out the rest of a handoff delay it was holding, and launches the next worker at once
-  when that moment has already passed.
+- It waits out the rest of a handoff delay it was holding, and launches the next worker at once when
+  that moment has already passed.
 - It recovers a worker that died while the daemon was down, by launching a diagnosis worker in its
   place — up to the recovery cap.
 
@@ -152,10 +152,10 @@ project. A closed project leaves `list_projects` and cannot be resumed; its stat
 disk, and `get_project_status` still reads it back by id. A project that is finishing with its
 current worker is refused for the seconds that takes — call again. A close that could not terminate
 the worker or kill the session reports the error and leaves the project in phase `failed` rather
-than retired; call `close_project` again to finish retiring it. A daemon that stops in the middle
-of a close does not carry it through either: the project comes back unretired, and the restart
-launches a diagnosis worker into it, so expect a live Claude Code session in the project you
-retired. Close it again.
+than retired; call `close_project` again to finish retiring it. A daemon that stops in the middle of
+a close does not carry it through either: the project comes back unretired, and the restart launches
+a diagnosis worker into it, so expect a live Claude Code session in the project you retired. Close
+it again.
 
 See "Recovery" and "Restart reconciliation" in [`docs/architecture.md`](docs/architecture.md) for
 how baton reaches phase `failed` and how it reconciles after a restart.
