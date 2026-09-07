@@ -76,7 +76,7 @@ dev = [
     { name = "coverage", specifier = ">=7.15.1,<8.0.0" },
     { name = "pytest", specifier = ">=9.1.1,<10.0.0" },
     { name = "ruff", specifier = ">=0.16.5,<0.17.0" },
-    { name = "rumdl", specifier = ">=0.2.55" },
+    { name = "rumdl", specifier = ">=0.2.68,<0.3.0" },
 ]
 
 [[package]]
