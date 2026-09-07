@@ -21,6 +21,13 @@ TERMINAL_MESSAGE_REQUIRED_STATES = [
     LifecycleState.blocked,
 ]
 
+DELAY_FORBIDDEN_STATES = [
+    LifecycleState.running,
+    LifecycleState.completed,
+    LifecycleState.failed,
+    LifecycleState.blocked,
+]
+
 
 def _assert_names_value_and_rule(
     excinfo: pytest.ExceptionInfo[ValueError], offending: object, rule_phrase: str
@@ -80,6 +87,7 @@ def test_lifecycle_state_members_spell_their_value(
         (ProjectPhase.recovering, "recovering"),
         (ProjectPhase.reconciling, "reconciling"),
         (ProjectPhase.blocked, "blocked"),
+        (ProjectPhase.waiting, "waiting"),
         (ProjectPhase.terminating, "terminating"),
         (ProjectPhase.completed, "completed"),
         (ProjectPhase.failed, "failed"),
@@ -221,6 +229,95 @@ def test_report_checks_the_message_before_the_next_prompt() -> None:
     assert "forbids a next prompt" not in str(excinfo.value)
 
 
+def test_success_report_accepts_a_delay() -> None:
+    """A success report accepts a whole, non-negative delay."""
+    report = LifecycleReport(
+        state=LifecycleState.success,
+        message="done",
+        next_prompt="next",
+        delay_seconds=3600,
+    )
+
+    assert report.delay_seconds == 3600
+
+
+def test_success_report_accepts_a_zero_delay() -> None:
+    """A success report accepts a delay of zero seconds."""
+    report = LifecycleReport(
+        state=LifecycleState.success,
+        message="done",
+        next_prompt="next",
+        delay_seconds=0,
+    )
+
+    assert report.delay_seconds == 0
+
+
+def test_success_report_without_a_delay_leaves_it_none() -> None:
+    """A success report that names no delay leaves delay_seconds as None."""
+    report = LifecycleReport(
+        state=LifecycleState.success, message="done", next_prompt="next"
+    )
+
+    assert report.delay_seconds is None
+
+
+@pytest.mark.parametrize("delay_seconds", [-1, -3600])
+def test_success_report_rejects_a_negative_delay(delay_seconds: int) -> None:
+    """A success report refuses a negative delay."""
+    with pytest.raises(ValueError) as excinfo:
+        LifecycleReport(
+            state=LifecycleState.success,
+            message="done",
+            next_prompt="next",
+            delay_seconds=delay_seconds,
+        )
+
+    _assert_names_value_and_rule(excinfo, delay_seconds, "a whole number of seconds")
+
+
+@pytest.mark.parametrize("delay_seconds", [1.5, 60.0, "60", True])
+def test_success_report_rejects_a_delay_that_is_not_a_whole_number(
+    delay_seconds: object,
+) -> None:
+    """A success report refuses a delay that is not a whole number of seconds.
+
+    True is in the sample because ``isinstance(True, int)`` holds, so a
+    JSON ``true`` would otherwise decode into a one-second delay.
+    """
+    with pytest.raises(ValueError) as excinfo:
+        LifecycleReport(
+            state=LifecycleState.success,
+            message="done",
+            next_prompt="next",
+            delay_seconds=delay_seconds,
+        )
+
+    _assert_names_value_and_rule(excinfo, delay_seconds, "a whole number of seconds")
+
+
+@pytest.mark.parametrize("state", DELAY_FORBIDDEN_STATES)
+def test_only_a_success_report_may_carry_a_delay(state: LifecycleState) -> None:
+    """Every state but success forbids a delay."""
+    with pytest.raises(ValueError) as excinfo:
+        LifecycleReport(state=state, message="the reason", delay_seconds=60)
+
+    _assert_names_value_and_rule(excinfo, 60, "forbids a delay")
+
+
+def test_report_checks_the_message_before_the_delay() -> None:
+    """When both the message and the delay are wrong, the message wins."""
+    with pytest.raises(ValueError) as excinfo:
+        LifecycleReport(
+            state=LifecycleState.completed,
+            message=None,
+            delay_seconds=60,
+        )
+
+    _assert_names_value_and_rule(excinfo, None, "requires a message")
+    assert "forbids a delay" not in str(excinfo.value)
+
+
 @pytest.mark.parametrize(
     ("state", "expected"),
     [
@@ -239,26 +336,31 @@ def test_is_terminal_matches_the_state(state: LifecycleState, expected: bool) ->
 
 
 def test_lifecycle_report_to_dict_maps_every_field() -> None:
-    """to_dict maps a report to its state value, message, and next prompt."""
+    """to_dict maps a report to its state value, message, prompt, and delay."""
     report = LifecycleReport(
-        state=LifecycleState.success, message="done", next_prompt="next"
+        state=LifecycleState.success,
+        message="done",
+        next_prompt="next",
+        delay_seconds=90,
     )
 
     assert report.to_dict() == {
         "state": "success",
         "message": "done",
         "next_prompt": "next",
+        "delay_seconds": 90,
     }
 
 
 def test_lifecycle_report_to_dict_preserves_absent_fields_as_none() -> None:
-    """to_dict keeps an absent message and next prompt as None."""
+    """to_dict keeps an absent message, next prompt, and delay as None."""
     report = LifecycleReport(state=LifecycleState.running)
 
     assert report.to_dict() == {
         "state": "running",
         "message": None,
         "next_prompt": None,
+        "delay_seconds": None,
     }
 
 
@@ -325,6 +427,7 @@ def test_project_state_new_is_uninitialized() -> None:
     assert state.last_report is None
     assert state.model is None
     assert state.recovery_attempts == 0
+    assert state.resume_at is None
 
 
 def test_project_state_new_updated_at_is_timezone_aware_utc() -> None:
@@ -411,10 +514,14 @@ def test_project_state_to_dict_maps_every_field(tmp_path: Path) -> None:
             pane_pid=4242,
         ),
         last_report=LifecycleReport(
-            state=LifecycleState.success, message="done", next_prompt="next"
+            state=LifecycleState.success,
+            message="done",
+            next_prompt="next",
+            delay_seconds=120,
         ),
         model="sonnet",
         recovery_attempts=2,
+        resume_at=datetime(2026, 9, 2, 12, 7, tzinfo=UTC),
         updated_at=datetime(2026, 9, 2, 12, 5, tzinfo=UTC),
     )
 
@@ -435,9 +542,11 @@ def test_project_state_to_dict_maps_every_field(tmp_path: Path) -> None:
             "state": "success",
             "message": "done",
             "next_prompt": "next",
+            "delay_seconds": 120,
         },
         "model": "sonnet",
         "recovery_attempts": 2,
+        "resume_at": "2026-09-02T12:07:00+00:00",
         "updated_at": "2026-09-02T12:05:00+00:00",
     }
 
@@ -455,6 +564,7 @@ def test_project_state_to_dict_preserves_absent_fields_as_none() -> None:
         last_report=None,
         model=None,
         recovery_attempts=0,
+        resume_at=None,
         updated_at=datetime(2026, 9, 2, 12, 0, tzinfo=UTC),
     )
 
@@ -469,6 +579,7 @@ def test_project_state_to_dict_preserves_absent_fields_as_none() -> None:
         "last_report": None,
         "model": None,
         "recovery_attempts": 0,
+        "resume_at": None,
         "updated_at": "2026-09-02T12:00:00+00:00",
     }
 

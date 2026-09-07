@@ -70,6 +70,7 @@ def test_defaults_come_from_the_documented_values(bin_dir: Path) -> None:
     assert config.model is None
     assert config.reconciliation_timeout == 300
     assert config.recovery_cap == 3
+    assert config.max_handoff_delay == 86400
 
 
 def test_every_field_reads_its_environment_variable(
@@ -91,6 +92,7 @@ def test_every_field_reads_its_environment_variable(
         "BATON_MODEL": "opus",
         "BATON_RECONCILIATION_TIMEOUT": "120",
         "BATON_RECOVERY_CAP": "5",
+        "BATON_MAX_HANDOFF_DELAY": "600",
     }
 
     config = BatonConfig.from_env(environ)
@@ -106,6 +108,7 @@ def test_every_field_reads_its_environment_variable(
     assert config.model == "opus"
     assert config.reconciliation_timeout == 120
     assert config.recovery_cap == 5
+    assert config.max_handoff_delay == 600
 
 
 def test_state_dir_expands_a_tilde(bin_dir: Path) -> None:

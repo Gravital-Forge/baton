@@ -7,9 +7,11 @@ it.
 """
 
 import asyncio
+import contextlib
 import logging
 import signal
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from baton.config import BatonConfig
@@ -40,6 +42,17 @@ def _pane_target(session: str) -> str:
         The pane target within the session's sole worker window.
     """
     return f"{session}:worker.0"
+
+
+async def _sleep_until(deadline: datetime) -> None:
+    """Sleep until an absolute moment has passed.
+
+    Args:
+        deadline: The UTC moment to sleep until. One already past
+            returns at once.
+    """
+    remaining = (deadline - datetime.now(UTC)).total_seconds()
+    await asyncio.sleep(max(remaining, 0.0))
 
 
 class SupervisorError(Exception):
@@ -87,6 +100,7 @@ class Supervisor:
         self._lock = asyncio.Lock()
         self._finish_task: asyncio.Task[None] | None = None
         self._reconciliation_deadline: float | None = None
+        self._shutting_down = False
 
     async def initialize(
         self,
@@ -171,9 +185,8 @@ class Supervisor:
             The committed ProjectState, in phase running.
 
         Raises:
-            SupervisorError: If the project still has a worker of its own
-                — any phase but completed or failed — or if prompt is
-                blank.
+            SupervisorError: If the project has not stopped — any phase
+                but completed or failed — or if prompt is blank.
             TmuxError: If creating the session or launching the worker
                 fails.
         """
@@ -199,6 +212,7 @@ class Supervisor:
                     worker=record,
                     last_report=None,
                     recovery_attempts=0,
+                    resume_at=None,
                 )
             )
             return self._state
@@ -219,6 +233,14 @@ class Supervisor:
         finish at the next startup, relaunching a project the operator
         had retired.
 
+        A project in waiting is holding between two workers, so its hold
+        is cancelled before the lock is taken and before the no-worker
+        shortcut retires it. Without that cancel, the hold would wake
+        after the retirement and launch a worker into a closed project.
+        A retirement that fails gives the project up rather than leaving
+        it in waiting, so the deadline on disk cannot outlive the close
+        either.
+
         Returns:
             The committed ProjectState, in phase closed.
 
@@ -226,11 +248,14 @@ class Supervisor:
             SupervisorError: If the project is already terminating, which
                 a finish already under way would commit over the top of.
                 That phase lasts seconds; the caller retries.
-            TmuxError: If killing the project's session fails. A worker
-                terminated before that failure leaves the project failed
-                rather than terminating, so a later close can still
-                retire it.
+            TmuxError: If killing the project's session fails. The
+                project is left failed rather than in the phase the close
+                stopped at, so a later close can still retire it and no
+                deadline outlives it.
         """
+        if self._state.phase == ProjectPhase.waiting:
+            await self._cancel_hold()
+
         async with self._lock:
             if self._state.phase == ProjectPhase.terminating:
                 raise SupervisorError(
@@ -240,7 +265,11 @@ class Supervisor:
                 )
             worker = self._state.worker
             if worker is None:
-                return self._retire()
+                try:
+                    return self._retire()
+                except Exception as exc:
+                    self._give_up_on_close(exc)
+                    raise
             self._commit(
                 self._state.updated(phase=ProjectPhase.terminating, last_report=None),
                 reason="the project was closed",
@@ -252,17 +281,8 @@ class Supervisor:
             async with self._lock:
                 return self._retire()
         except Exception as exc:
-            _log.exception("retiring the project failed")
-            # The project must not be left in terminating: that phase
-            # refuses every later close, every report and every resume,
-            # and check_worker skips it, so nothing would move the project
-            # until the daemon restarted. failed is a phase a later close
-            # can retire.
             async with self._lock:
-                self._commit(
-                    self._state.updated(phase=ProjectPhase.failed, worker=None),
-                    reason=f"retiring the project failed: {exc}",
-                )
+                self._give_up_on_close(exc)
             raise
 
     async def record_status(self, worker_id: str, message: str) -> None:
@@ -289,6 +309,7 @@ class Supervisor:
         state: LifecycleState,
         message: str | None = None,
         next_prompt: str | None = None,
+        delay_seconds: int | None = None,
     ) -> None:
         """Record a worker's lifecycle report and route on it.
 
@@ -303,18 +324,32 @@ class Supervisor:
                 state except running.
             next_prompt: The next worker's prompt, required for success
                 and forbidden otherwise.
+            delay_seconds: How long the handoff holds after this worker
+                is terminated, allowed only with success. None or 0
+                launches the next worker at once.
 
         Raises:
             SupervisorError: If the report's payload breaks its state's
-                rule, if worker_id is not the current worker's id, or if
-                the project is already terminating.
+                rule, if delay_seconds exceeds the configured maximum,
+                if worker_id is not the current worker's id, or if the
+                project is already terminating.
         """
         try:
             report = LifecycleReport(
-                state=state, message=message, next_prompt=next_prompt
+                state=state,
+                message=message,
+                next_prompt=next_prompt,
+                delay_seconds=delay_seconds,
             )
         except ValueError as exc:
             raise SupervisorError(str(exc)) from exc
+
+        cap = self._config.max_handoff_delay
+        if delay_seconds is not None and delay_seconds > cap:
+            raise SupervisorError(
+                f"a delay of {delay_seconds} seconds exceeds the maximum of "
+                f"{cap} seconds"
+            )
 
         async with self._lock:
             self._require_current_worker(worker_id)
@@ -332,6 +367,7 @@ class Supervisor:
                     "state": report.state.value,
                     "message": report.message,
                     "next_prompt": report.next_prompt,
+                    "delay_seconds": report.delay_seconds,
                 },
             )
 
@@ -453,9 +489,10 @@ class Supervisor:
         recovering, or reconciling has a worker whose current lifecycle
         state baton no longer knows, so its pane is asked to report it. A
         project in terminating has a finish that never ran to completion,
-        so that finish is resumed. A project in uninitialized, completed,
-        failed, or closed has no worker to reconcile with and is left
-        alone.
+        so that finish is resumed. A project in waiting has no worker
+        either, but is still owed a hold, so the remainder of that hold
+        is resumed. A project in uninitialized, completed, failed, or
+        closed has no worker to reconcile with and is left alone.
 
         Raises:
             TmuxError: If sending the reconciliation request to the pane
@@ -463,6 +500,9 @@ class Supervisor:
                 goes on to serve every other one.
         """
         async with self._lock:
+            if self._state.phase == ProjectPhase.waiting:
+                self._finish_task = asyncio.create_task(self._resume_hold())
+                return
             worker = self._state.worker
             if worker is None:
                 return
@@ -496,11 +536,27 @@ class Supervisor:
             )
 
     async def shutdown(self) -> None:
-        """Drain any finish still pending.
+        """Cancel a pending hold, or drain any other finish still pending.
 
         Safe to call whether or not a finish is pending. The coordinator
         stops the watchdog; a supervisor has none of its own.
+
+        The flag is set before the phase is read, so a finish that has
+        not yet committed waiting stops there rather than entering its
+        hold. A project already holding is cancelled instead of drained,
+        which would otherwise block the daemon for the length of the
+        delay; its deadline is persisted, so the next start resumes it.
+
+        The lock covers the phase read alone. A finish still in its grace
+        period takes that same lock to commit waiting, so a drain that
+        held it would deadlock.
         """
+        self._shutting_down = True
+        async with self._lock:
+            phase = self._state.phase
+        if phase == ProjectPhase.waiting:
+            await self._cancel_hold()
+            return
         await self.wait_for_finish()
 
     def _commit(self, new_state: ProjectState, reason: str | None = None) -> None:
@@ -586,8 +642,35 @@ class Supervisor:
         session = self._state.session_name
         if self._tmux.has_session(session=session):
             self._tmux.kill_session(session=session)
-        self._commit(self._state.updated(phase=ProjectPhase.closed, worker=None))
+        self._commit(
+            self._state.updated(phase=ProjectPhase.closed, worker=None, resume_at=None)
+        )
         return self._state
+
+    def _give_up_on_close(self, exc: Exception) -> None:
+        """Give the project up after a close failed, leaving nothing live behind.
+
+        Called with the lock held, and from inside an except block: the
+        log call records the exception being handled, which only that
+        context supplies.
+
+        The project must not be left in the phase the close stopped at.
+        terminating refuses every later close, every report and every
+        resume, and check_worker skips it, so nothing would move the
+        project until the daemon restarted. waiting keeps a deadline on
+        disk that the next start would wait out, launching a worker into
+        the project the operator had just retired. failed is a phase a
+        later close can retire, and it carries no deadline.
+
+        Args:
+            exc: The exception that ended the close, folded into the
+                phase event's reason.
+        """
+        _log.exception("retiring the project failed")
+        self._commit(
+            self._state.updated(phase=ProjectPhase.failed, worker=None, resume_at=None),
+            reason=f"retiring the project failed: {exc}",
+        )
 
     def _require_current_worker(self, worker_id: str) -> None:
         """Refuse a call from a worker that is not the current one.
@@ -616,6 +699,18 @@ class Supervisor:
         See "The normal loop" in docs/architecture.md for the grace period
         and for where each terminal report routes the project next.
 
+        A report carrying a delay holds between the termination and the
+        route: the project moves to waiting, with the deadline persisted
+        and the worker cleared, and the next worker launches once that
+        deadline has passed. Clearing the worker is what keeps the hold
+        alive: check_worker reads a dead pane on a project that still
+        names a worker as a vanish, and would recover the project on its
+        next tick. The lock is taken in stretches around the wait rather
+        than across it, for the reason close documents. A shutdown that
+        reaches the supervisor before the hold begins stops the finish
+        there instead, with the deadline already persisted for the next
+        start to resume.
+
         Args:
             report: The terminal lifecycle report that triggered this
                 finish, captured when it was scheduled.
@@ -625,22 +720,105 @@ class Supervisor:
         await asyncio.sleep(self._config.grace_period)
         try:
             await self._terminate(worker)
+            delay_seconds = report.delay_seconds
+            if delay_seconds is not None and delay_seconds > 0:
+                async with self._lock:
+                    deadline = datetime.now(UTC) + timedelta(seconds=delay_seconds)
+                    self._commit(
+                        self._state.updated(
+                            phase=ProjectPhase.waiting,
+                            worker=None,
+                            resume_at=deadline,
+                        ),
+                        reason=(
+                            f"the worker asked for a delay of {delay_seconds} "
+                            f"seconds, until {deadline.isoformat()}"
+                        ),
+                    )
+                    if self._shutting_down:
+                        return
+                await _sleep_until(deadline)
             async with self._lock:
                 self._route(report)
         except Exception as exc:
-            _log.exception("the handoff after a %r report failed", report.state.value)
             # Whatever went wrong, the project must not be left in
             # terminating: that phase refuses every later report and every
             # new initialization, so nothing would move until the daemon
             # restarted and resumed the finish. The raise keeps the failure
             # retrievable through wait_for_finish.
-            async with self._lock:
-                self._commit(
-                    self._state.updated(phase=ProjectPhase.failed, worker=None),
-                    reason=f"the handoff after a {report.state.value!r} "
-                    f"report failed: {exc}",
-                )
+            await self._fail_handoff(report, exc)
             raise
+
+    async def _resume_hold(self) -> None:
+        """Wait out a persisted hold, then route the report that began it.
+
+        The counterpart to _finish for a project found in waiting at
+        startup: its worker is already terminated and its deadline
+        already committed, so only the wait and the route are left. A
+        deadline already past routes at once.
+
+        A failure here is logged where _finish re-raises its own, because
+        nothing awaits this task: a shutdown cancels it rather than
+        draining it, so wait_for_finish is never reached.
+        """
+        report = self._state.last_report
+        try:
+            await _sleep_until(self._state.resume_at)
+            async with self._lock:
+                self._route(report)
+        except Exception as exc:  # noqa: BLE001 - nothing awaits this task
+            await self._fail_handoff(report, exc)
+
+    async def _fail_handoff(self, report: LifecycleReport, exc: Exception) -> None:
+        """Give the project up after a handoff failed, recording why.
+
+        What a failed handoff means to a project, for both the finish
+        that routes a fresh report and the hold resumed at startup: it
+        must not be left in the phase it was passing through, and no
+        deadline may outlive it.
+
+        Call this from inside an except block. The log call records the
+        exception being handled, which only that context supplies.
+
+        Args:
+            report: The terminal report whose handoff failed.
+            exc: The exception that ended the handoff, folded into the
+                phase event's reason.
+        """
+        _log.exception("the handoff after a %r report failed", report.state.value)
+        async with self._lock:
+            self._commit(
+                self._state.updated(
+                    phase=ProjectPhase.failed, worker=None, resume_at=None
+                ),
+                reason=f"the handoff after a {report.state.value!r} "
+                f"report failed: {exc}",
+            )
+
+    async def _cancel_hold(self) -> None:
+        """Cancel a pending hold, so nothing it would have done still happens.
+
+        Called with the lock released, and safe to call whether or not a
+        hold is scheduled: a project restored in waiting has one only
+        once reconcile has run.
+
+        The handle is cleared afterwards because wait_for_finish awaits
+        it, and awaiting a cancelled task re-raises the cancellation at
+        whoever awaits it. Left set, a close during a hold would make the
+        shutdown that follows raise, which the coordinator records as a
+        drain failure for an ordinary close.
+        """
+        if self._finish_task is None:
+            return
+        # A cancel lands only at an await point, and _route runs
+        # synchronously from the launch through the commit that records
+        # it. So the cancel falls either before the hold takes the lock
+        # or after that commit, never between a launched worker and
+        # baton's record of it.
+        self._finish_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await self._finish_task
+        self._finish_task = None
 
     async def _finish_abnormal(self, worker: WorkerRecord, reason: str) -> None:
         """Terminate a worker baton gave up on, then recover, with no grace period.
@@ -693,7 +871,10 @@ class Supervisor:
             )
             self._commit(
                 self._state.updated(
-                    phase=ProjectPhase.running, worker=record, recovery_attempts=0
+                    phase=ProjectPhase.running,
+                    worker=record,
+                    recovery_attempts=0,
+                    resume_at=None,
                 )
             )
         elif report.state == LifecycleState.completed:

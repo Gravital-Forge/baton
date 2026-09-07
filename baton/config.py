@@ -15,6 +15,7 @@ DEFAULT_TERMINATION_TIMEOUT = 5
 DEFAULT_POLL_INTERVAL = 2
 DEFAULT_RECONCILIATION_TIMEOUT = 300
 DEFAULT_RECOVERY_CAP = 3
+DEFAULT_MAX_HANDOFF_DELAY = 86400
 
 
 def _read_int(environ: Mapping[str, str], key: str, default: int) -> int:
@@ -137,6 +138,10 @@ class BatonConfig:
             consecutively for a project — a success report resets the
             count — before it stops and waits for a human. Read from
             ``BATON_RECOVERY_CAP``. Defaults to ``3``.
+        max_handoff_delay: The largest delay, in seconds, a ``success``
+            report may ask baton to hold for before it launches the next
+            worker. Read from ``BATON_MAX_HANDOFF_DELAY``. Defaults to
+            ``86400``, which is 24 hours.
     """
 
     host: str
@@ -150,6 +155,7 @@ class BatonConfig:
     model: str | None
     reconciliation_timeout: int
     recovery_cap: int
+    max_handoff_delay: int
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> Self:
@@ -192,4 +198,7 @@ class BatonConfig:
                 DEFAULT_RECONCILIATION_TIMEOUT,
             ),
             recovery_cap=_read_int(environ, "BATON_RECOVERY_CAP", DEFAULT_RECOVERY_CAP),
+            max_handoff_delay=_read_int(
+                environ, "BATON_MAX_HANDOFF_DELAY", DEFAULT_MAX_HANDOFF_DELAY
+            ),
         )

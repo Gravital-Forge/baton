@@ -85,11 +85,14 @@ on: prose in a worker's output is never a signal.
   resumes work from phase `blocked`. Baton returns the project to `running` from `blocked` or from
   `reconciling`, and moves nothing otherwise (see "Restart reconciliation" for the request).
 
-Baton checks a report's payload against two rules, in this order, so a report that breaks both is
-refused for the message alone:
+Baton checks a report's payload against these rules, in this order, so a report that breaks more
+than one is refused for the first of them:
 
 1. Every state except `running` requires a message that is not blank. `running` may carry one.
 2. `success` requires a next prompt that is not blank. Every other state forbids one.
+3. `success` alone may carry a delay. It is a whole number of seconds, not negative, and no larger
+   than `BATON_MAX_HANDOFF_DELAY` (see the readme). Baton refuses the whole report when a delay
+   falls outside those bounds, rather than trimming it to fit.
 
 `success`, `completed`, and `failed` are terminal, and a terminal report is final: it moves the
 project to phase `terminating`. Baton refuses every report from the current worker while the
@@ -132,6 +135,14 @@ with the prompt the last one wrote — a `launch` event, and a `phase` event bac
 "Recovery"). A `blocked` report skips termination: it moves the project to phase `blocked` and
 leaves the worker alive for the human who must unblock it.
 
+A `success` report may name a delay, and baton holds that long between the two workers. A delay of
+`0` holds nothing, and that handoff runs exactly as an undelayed one does. Otherwise baton
+terminates the finished worker the usual way, then logs a `phase` event moving the project to
+`waiting`, whose reason carries the delay and the moment the hold ends. The `launch` and the
+`phase` event back to `running` come once that moment has passed. A holding project has no current
+worker, which is what keeps the watchdog off it: a dead pane held with a current worker is what
+recovery reads as a vanish (see "Recovery").
+
 A `running` report can arrive while the project is `blocked`, `reconciling`, `running`, or
 `recovering`. From `blocked` or from `reconciling` it returns the project to phase `running` — a
 `phase` event recording the move — and leaves the worker alive. From `running` or from `recovering`
@@ -143,14 +154,16 @@ A project that has stopped — phase `completed` or phase `failed` — has no wo
 `resume_project` carries it on with a fresh one. The project keeps its id, its title, its session
 name, its path, its model and its event log; only the worker is new. The recovery attempt count
 resets and the last report is cleared, so a stopped worker's outcome is not read back as though it
-were the new worker's. A project in any other phase is refused: it still has a worker of its own, or
-it has been closed.
+were the new worker's. A project in any other phase is refused: it still has a worker of its own,
+it is holding between two workers, or it has been closed.
 
 `close_project` retires a project for good. It moves the project to phase `terminating`, waits the
 grace period, terminates the worker, kills the project's tmux session, and commits phase `closed`
-with no worker. A project with no worker skips straight to the kill and the commit. The kill is
-guarded by `has_session`, because an absent session is an ordinary state — a tmux server restart, or
-an operator who killed it — and killing a session that is not there raises.
+with no worker. A project with no worker skips straight to the kill and the commit. A project
+holding between two workers has its pending hold cancelled first, before the lock and before that
+shortcut: a hold left running would wake after the retirement and launch a worker into a closed
+project. The kill is guarded by `has_session`, because an absent session is an ordinary state — a
+tmux server restart, or an operator who killed it — and killing a session that is not there raises.
 
 `close` holds the supervisor's lock in two stretches, the way a finish does, with the grace period
 and the termination poll between them. A lock held across both would stall the watchdog:
@@ -161,9 +174,11 @@ a project already in phase `terminating` and names the phase. That phase lasts s
 retries.
 
 A close whose termination or session kill raises commits phase `failed` with the reason, rather than
-leaving the project in `terminating` — a phase that refuses every later close, every report and
-every resume, and that `check_worker` skips, so nothing would move the project until the daemon
-restarted. The failure still reaches the caller, and a later close can retire the project.
+leaving the project where the close stopped. A project left in `terminating` refuses every later
+close, every report and every resume, and `check_worker` skips it, so nothing would move it until
+the daemon restarted. One left in `waiting` keeps its deadline, and the next start would wait that
+hold out and launch a worker into the project the operator had retired. The failure still reaches
+the caller, and a later close can retire the project.
 
 A closed project leaves `list_projects` but stays reachable by its id. Its state directory is the
 record of what ran, and `get_project_status` reads it back.
@@ -213,7 +228,10 @@ state baton does not know, so baton reads its pane. A live pane gets the reconci
 `send_keys`. Baton appends a `reconcile` event carrying the timeout, starts the clock, and moves the
 project to phase `reconciling`. A dead pane is left alone: the watchdog's first tick finds it,
 records the vanish, and recovers (see "Recovery"). A project with no worker on record — `completed`,
-`failed`, or `closed` — has nothing to reconcile with, and is left alone.
+`failed`, or `closed` — has nothing to reconcile with, and is left alone. A project in phase
+`waiting` has no worker either, but it is owed the rest of a hold. Baton waits out whatever remains
+of its persisted deadline and then launches the next worker, or launches at once when that deadline
+has already passed.
 
 A project in phase `terminating` has a finish that never ran to completion, so it is resumed. A
 terminal last report means the worker did report before the daemon stopped, and its finish resumes
@@ -258,6 +276,11 @@ signal, and the route or recovery that follows — runs to completion before the
 drain gathers every project with `return_exceptions=True` and logs whatever comes back as an
 exception, so one project's failing finish cannot leave the projects after it undrained.
 
+A shutdown never waits out a handoff delay. A project already holding is cancelled rather than
+drained, and a finish that has not yet begun its hold stops at the commit that enters `waiting`.
+Either way the deadline is on disk, so the next start resumes whatever remains of it (see "Restart
+reconciliation"). Draining a hold would instead keep the daemon open for the length of the delay.
+
 ## The tmux layout
 
 One session serves each project: one window, named `worker`, with one pane and `remain-on-exit`
@@ -299,8 +322,8 @@ directory per project:
 - `mcp.json` — the MCP client config a worker's Claude Code session is pointed at. Its content
   depends only on the daemon's host and port, so one daemon publishes one of them.
 - `state.json` — the project's id and title, its current phase, worker and last report, the tmux
-  session and pane its workers run in, the directory they work in, the model they run on, and the
-  recovery attempt count.
+  session and pane its workers run in, the directory they work in, the model they run on, the
+  recovery attempt count, and the moment a pending hold ends.
 - `events.jsonl` — the append-only log `get_project_status` reads back for that project.
 - `workers/<worker id>/` — the `prompt.md` a worker was launched with, and the `launch.sh` that ran
   it. These files stay after the worker ends, as the record of what ran.

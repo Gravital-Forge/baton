@@ -58,6 +58,7 @@ def config(tmp_path: Path) -> BatonConfig:
         model="sonnet",
         reconciliation_timeout=0,
         recovery_cap=3,
+        max_handoff_delay=86400,
     )
 
 

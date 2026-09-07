@@ -60,6 +60,9 @@ default except `BATON_MODEL`, and one configuration governs every project the da
   reconciliation request before giving up on it and starting recovery. Default `300`.
 - `BATON_RECOVERY_CAP` — the number of diagnosis workers baton launches in a row before it stops
   and holds that project in phase `failed`. Default `3`.
+- `BATON_MAX_HANDOFF_DELAY` — the largest delay, in seconds, a `success` report may ask baton to
+  hold for before it launches the next worker. Default `86400`, which is 24 hours. Baton refuses a
+  report that asks for more.
 
 Baton refuses to start when it cannot find `claude` or `tmux`.
 
@@ -120,6 +123,8 @@ A restarted daemon carries each project forward on its own:
   asking for its current state, and waits a bounded time — `BATON_RECONCILIATION_TIMEOUT` — for
   the answer.
 - It resumes a handoff it was in the middle of when it stopped.
+- It waits out the rest of a handoff delay it was holding, and launches the next worker at once
+  when that moment has already passed.
 - It recovers a worker that died while the daemon was down, by launching a diagnosis worker in its
   place — up to the recovery cap.
 
