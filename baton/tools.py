@@ -296,8 +296,9 @@ class BatonTools:
            state, ``running`` included, forbids one.
         3. ``success`` alone may carry a delay. It is a whole number of
            seconds, not negative, and no larger than the daemon's configured
-           maximum, which defaults to 24 hours. A delay outside those bounds
-           refuses the report rather than being trimmed to fit.
+           maximum, which defaults to 24 hours. Baton refuses the whole
+           report when a delay falls outside those bounds, rather than
+           trimming it to fit.
 
         ``success``, ``completed`` and ``failed`` are terminal, and a
         terminal report is final: baton refuses every report that follows

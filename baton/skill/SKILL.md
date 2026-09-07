@@ -53,9 +53,9 @@ enough task-specific detail that its next action is unambiguous.
 Pass `delay_seconds` when that worker should not start yet. Baton terminates you,
 waits that many seconds, and then launches it. The delay is a whole number of
 seconds, not negative, and no larger than the daemon's configured maximum, which
-defaults to 24 hours. A delay outside those bounds refuses the report rather than
-being trimmed to fit. Only `success` may carry a delay; every other state refuses
-one.
+defaults to 24 hours. Baton refuses the whole report when a delay falls outside
+those bounds, rather than trimming it to fit. Only `success` may carry a delay;
+every other state refuses one.
 
 ## Reconciliation
 
