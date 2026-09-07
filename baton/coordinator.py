@@ -172,8 +172,9 @@ class Coordinator:
             initial_prompt: The prompt the first worker is launched with.
             session_name: The tmux session to use, or None to derive one
                 from the title.
-            model: The model every worker of this project runs on, or
-                None to use the daemon's configured default.
+            model: The project's default model, which a worker runs on
+                when nothing overrides it, or None to use the daemon's
+                configured default.
 
         Returns:
             The new project's committed ProjectState, in phase running.
@@ -212,12 +213,16 @@ class Coordinator:
         states = (supervisor.snapshot() for supervisor in self._supervisors.values())
         return [state for state in states if state.phase != ProjectPhase.closed]
 
-    async def resume(self, project_id: str, prompt: str) -> ProjectState:
+    async def resume(
+        self, project_id: str, prompt: str, model: str | None = None
+    ) -> ProjectState:
         """Launch a fresh worker on a project that has none.
 
         Args:
             project_id: The id of the project to carry on.
             prompt: The task the new worker is launched with.
+            model: The model the resumed worker runs on, for that worker
+                alone, or None to run it on the project's model.
 
         Returns:
             The project's committed ProjectState, in phase running.
@@ -226,11 +231,11 @@ class Coordinator:
             CoordinatorError: If no project is registered under that id.
             SupervisorError: If the project is in any phase but completed
                 or failed — it still has a worker of its own, or it has
-                been closed — or if prompt is blank.
+                been closed — or if prompt or a given model is blank.
             TmuxError: If creating the session or launching the worker
                 fails.
         """
-        return await self.supervisor(project_id).resume(prompt)
+        return await self.supervisor(project_id).resume(prompt, model=model)
 
     async def close(self, project_id: str) -> ProjectState:
         """Retire a project, terminating any worker it still has.

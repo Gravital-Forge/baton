@@ -28,7 +28,7 @@ The states:
 - **`success`** — the task is done and more work remains. Supply the next prompt;
   `success` without one is not a valid report. It may also name a delay: baton
   terminates you as usual, holds for that long, and then launches the next
-  worker.
+  worker. It may name the model the next worker runs on, too.
 - **`completed`** — the whole project is done, not just this task.
 - **`failed`** — you could not complete the task. Say what went wrong. Baton
   terminates you and launches a diagnosis worker to investigate.
@@ -56,6 +56,13 @@ seconds, not negative, and no larger than the daemon's configured maximum, which
 defaults to 24 hours. Baton refuses the whole report when a delay falls outside
 those bounds, rather than trimming it to fit. Only `success` may carry a delay;
 every other state refuses one.
+
+Pass `model` when the next worker should run on a model other than the project's.
+It governs that worker alone: the worker after it runs on the project's model
+again, unless its own report names a model too. Omitting `model` is always
+correct — the project's model governs. The value is whatever `claude --model`
+accepts on this machine: an alias, or a model's full name, as `claude --help`
+describes it. Baton refuses a blank model, and only `success` may carry one.
 
 ## Reconciliation
 
@@ -89,18 +96,18 @@ Your project's id is in the `BATON_PROJECT` environment variable. That id is wha
 These are yours:
 
 - `report_status(worker_id, message)` — records a milestone.
-- `report_lifecycle(worker_id, state, message=None, next_prompt=None, delay_seconds=None)` —
+- `report_lifecycle(worker_id, state, message=None, next_prompt=None, delay_seconds=None, model=None)` —
   reports your lifecycle state. The only call baton acts on.
 - `get_project_status(project_id)` — reads back a project's phase, current worker,
-  model, last lifecycle report, the moment a pending handoff delay ends, and
-  recent events.
+  default model, last lifecycle report, the moment a pending handoff delay ends,
+  and recent events.
 
 These belong to the setup agent, not to you:
 
 - `initialize_project(project_path, title, initial_prompt, session_name=None, model=None)` —
   creates a project and launches its first worker, and returns the project's id.
 - `list_projects()` — lists every project baton supervises, one row each.
-- `resume_project(project_id, prompt)` — launches a fresh worker on a project that
-  stopped, keeping its id and its event log.
+- `resume_project(project_id, prompt, model=None)` — launches a fresh worker on
+  a project that stopped, keeping its id and its event log.
 - `close_project(project_id)` — retires a project, terminates its worker, and kills
   its tmux session.

@@ -351,6 +351,7 @@ class StubSupervisor:
         message: str | None = None,
         next_prompt: str | None = None,
         delay_seconds: int | None = None,
+        model: str | None = None,
     ) -> None:
         """Record the call, or raise the scripted error.
 
@@ -360,6 +361,7 @@ class StubSupervisor:
             message: The message passed in.
             next_prompt: The next prompt passed in.
             delay_seconds: The handoff delay passed in.
+            model: The next worker's model passed in.
 
         Raises:
             SupervisorError: `report_lifecycle_error`, when one was
@@ -374,6 +376,7 @@ class StubSupervisor:
                 "message": message,
                 "next_prompt": next_prompt,
                 "delay_seconds": delay_seconds,
+                "model": model,
             }
         )
 
@@ -494,12 +497,15 @@ class StubCoordinator:
         """
         return list(self._projects)
 
-    async def resume(self, project_id: str, prompt: str) -> ProjectState:
+    async def resume(
+        self, project_id: str, prompt: str, model: str | None = None
+    ) -> ProjectState:
         """Record the call and return the supervisor's state, or raise.
 
         Args:
             project_id: The project id passed in.
             prompt: The prompt passed in.
+            model: The model passed in.
 
         Returns:
             The scripted supervisor's state.
@@ -509,7 +515,9 @@ class StubCoordinator:
         """
         if self._resume_error is not None:
             raise self._resume_error
-        self.resume_calls.append({"project_id": project_id, "prompt": prompt})
+        self.resume_calls.append(
+            {"project_id": project_id, "prompt": prompt, "model": model}
+        )
         return self._supervisor.snapshot()
 
     async def close(self, project_id: str) -> ProjectState:

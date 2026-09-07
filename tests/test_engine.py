@@ -140,6 +140,7 @@ def _persist_waiting_project(
     *,
     resume_at: datetime,
     next_prompt: str,
+    model: str | None = None,
 ) -> None:
     """Save a persisted ProjectState mid-hold, for a Supervisor built after.
 
@@ -155,6 +156,8 @@ def _persist_waiting_project(
             its resolved form is what is saved.
         resume_at: The moment the persisted hold ends.
         next_prompt: The prompt the persisted report hands on.
+        model: The model the persisted report names for the next worker,
+            or None for a report that names none.
     """
     store.save(
         ProjectState.new(project_id, TITLE).updated(
@@ -169,6 +172,7 @@ def _persist_waiting_project(
                 message="phase one done",
                 next_prompt=next_prompt,
                 delay_seconds=60,
+                model=model,
             ),
             resume_at=resume_at,
         )
@@ -338,6 +342,7 @@ async def test_initialize_appends_launch_then_phase_events(
     assert launch_event.payload == {
         "prompt_path": str(result.worker.prompt_path),
         "pane_target": result.pane_target,
+        "model": "sonnet",
     }
     assert phase_event.worker_id is None
     assert phase_event.payload == {
@@ -871,6 +876,99 @@ async def test_success_report_produces_the_full_event_sequence_in_order(
 
 
 @pytest.mark.anyio
+async def test_a_success_report_naming_a_model_launches_the_next_worker_on_it(
+    supervisor: Supervisor, launcher: FakeLauncher, project_dir: Path
+) -> None:
+    """A success report naming a model launches the next worker on it."""
+    result = await supervisor.initialize(project_dir, "start here")
+
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        model="fable",
+    )
+    await supervisor.wait_for_finish()
+
+    assert launcher.launches[1]["model"] == "fable"
+
+
+@pytest.mark.anyio
+async def test_a_named_model_leaves_the_projects_own_model_alone(
+    store: StateStore, supervisor: Supervisor, project_dir: Path
+) -> None:
+    """A report's model is never written back over the project's own model."""
+    result = await supervisor.initialize(project_dir, "start here")
+
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        model="fable",
+    )
+    await supervisor.wait_for_finish()
+
+    for state in _persisted_and_live(store, supervisor):
+        assert state.model == "sonnet"
+
+
+@pytest.mark.anyio
+async def test_the_worker_after_an_override_runs_on_the_projects_model_again(
+    supervisor: Supervisor, launcher: FakeLauncher, project_dir: Path
+) -> None:
+    """An override governs one launch, and the worker after it the project's."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        model="fable",
+    )
+    await supervisor.wait_for_finish()
+
+    await supervisor.report_lifecycle(
+        supervisor.snapshot().worker.worker_id,
+        LifecycleState.success,
+        message="phase two done",
+        next_prompt="phase three",
+    )
+    await supervisor.wait_for_finish()
+
+    assert [launch["model"] for launch in launcher.launches] == [
+        "sonnet",
+        "fable",
+        "sonnet",
+    ]
+
+
+@pytest.mark.anyio
+async def test_the_launch_event_of_an_override_handoff_carries_the_named_model(
+    supervisor: Supervisor, project_dir: Path
+) -> None:
+    """Every launch event names the model that worker started on."""
+    result = await supervisor.initialize(project_dir, "start here")
+
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        model="fable",
+    )
+    await supervisor.wait_for_finish()
+
+    launch_events = [
+        event
+        for event in supervisor.recent_events(count=20)
+        if event.kind == EventKind.launch
+    ]
+    assert [event.payload["model"] for event in launch_events] == ["sonnet", "fable"]
+
+
+@pytest.mark.anyio
 async def test_completed_report_terminates_and_stops_with_no_worker(
     store: StateStore,
     supervisor: Supervisor,
@@ -1345,6 +1443,33 @@ async def test_a_success_report_without_a_positive_delay_never_waits(
     state = supervisor.snapshot()
     assert state.phase == ProjectPhase.running
     assert state.resume_at is None
+
+
+@pytest.mark.anyio
+async def test_a_delayed_success_naming_a_model_launches_on_it_after_the_hold(
+    supervisor: Supervisor,
+    launcher: FakeLauncher,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delay and a model together launch on that model when the hold ends."""
+    hold = _hold_the_sleep(monkeypatch)
+    result = await supervisor.initialize(project_dir, "start here")
+
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        delay_seconds=60,
+        model="fable",
+    )
+    await hold.wait_until_held()
+
+    hold.release()
+    await supervisor.wait_for_finish()
+
+    assert launcher.launches[1]["model"] == "fable"
 
 
 @pytest.mark.anyio
@@ -1976,6 +2101,30 @@ async def test_check_worker_with_a_dead_pane_while_running_recovers(
     )
     assert supervisor.snapshot().phase == ProjectPhase.recovering
     assert supervisor.snapshot().recovery_attempts == 1
+
+
+@pytest.mark.anyio
+async def test_a_vanished_override_worker_is_diagnosed_on_the_projects_model(
+    supervisor: Supervisor, launcher: FakeLauncher, project_dir: Path
+) -> None:
+    """A diagnosis worker after an override runs on the project's model."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id,
+        LifecycleState.success,
+        message="phase one done",
+        next_prompt="phase two",
+        model="fable",
+    )
+    await supervisor.wait_for_finish()
+
+    await supervisor.check_worker()
+
+    assert [launch["model"] for launch in launcher.launches] == [
+        "sonnet",
+        "fable",
+        "sonnet",
+    ]
 
 
 @pytest.mark.anyio
@@ -2698,6 +2847,36 @@ async def test_a_resumed_hold_launches_the_next_worker_when_it_is_released(
 
 
 @pytest.mark.anyio
+async def test_a_resumed_hold_launches_on_the_persisted_reports_model(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_id: str,
+    project_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A hold resumed at startup launches on the model its report named."""
+    hold = _hold_the_sleep(monkeypatch)
+    _persist_waiting_project(
+        store,
+        project_id,
+        project_dir,
+        resume_at=datetime.now(UTC) + timedelta(seconds=60),
+        next_prompt="phase two",
+        model="fable",
+    )
+    supervisor = _persisted_supervisor(config, store, tmux, launcher)
+    await supervisor.reconcile()
+    await hold.wait_until_held()
+
+    hold.release()
+    await supervisor.wait_for_finish()
+
+    assert [launch["model"] for launch in launcher.launches] == ["fable"]
+
+
+@pytest.mark.anyio
 async def test_reconcile_in_waiting_past_its_deadline_launches_at_once(
     config: BatonConfig,
     store: StateStore,
@@ -3137,6 +3316,140 @@ async def test_resume_is_refused_for_a_blank_prompt(
         await supervisor.resume(prompt)
 
     assert len(launcher.launches) == 1
+
+
+@pytest.mark.anyio
+async def test_resume_launches_the_resumed_worker_on_the_model_it_names(
+    supervisor: Supervisor, launcher: FakeLauncher, project_dir: Path
+) -> None:
+    """Resume launches its fresh worker on the model the call names."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.completed, message="all done"
+    )
+    await supervisor.wait_for_finish()
+
+    await supervisor.resume("carry on", model="fable")
+
+    assert launcher.launches[1]["model"] == "fable"
+
+
+@pytest.mark.anyio
+async def test_resume_with_a_padded_model_argument_launches_on_it_stripped(
+    supervisor: Supervisor, launcher: FakeLauncher, project_dir: Path
+) -> None:
+    """A padded model argument reaches the launcher stripped."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.completed, message="all done"
+    )
+    await supervisor.wait_for_finish()
+
+    await supervisor.resume("carry on", model="  fable  ")
+
+    assert launcher.launches[1]["model"] == "fable"
+
+
+@pytest.mark.anyio
+async def test_a_resume_model_leaves_the_projects_own_model_alone(
+    store: StateStore, supervisor: Supervisor, project_dir: Path
+) -> None:
+    """A model given to resume is never written back over the project's own."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.completed, message="all done"
+    )
+    await supervisor.wait_for_finish()
+
+    await supervisor.resume("carry on", model="fable")
+
+    for state in _persisted_and_live(store, supervisor):
+        assert state.model == "sonnet"
+
+
+@pytest.mark.anyio
+async def test_the_worker_after_a_resume_override_runs_on_the_projects_model(
+    supervisor: Supervisor, launcher: FakeLauncher, project_dir: Path
+) -> None:
+    """A model given to resume governs that worker, and no worker after it."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.completed, message="all done"
+    )
+    await supervisor.wait_for_finish()
+    await supervisor.resume("carry on", model="fable")
+
+    await supervisor.report_lifecycle(
+        supervisor.snapshot().worker.worker_id,
+        LifecycleState.success,
+        message="carried on",
+        next_prompt="phase three",
+    )
+    await supervisor.wait_for_finish()
+
+    assert [launch["model"] for launch in launcher.launches] == [
+        "sonnet",
+        "fable",
+        "sonnet",
+    ]
+
+
+@pytest.mark.anyio
+async def test_resume_naming_no_model_launches_on_the_projects_model(
+    supervisor: Supervisor, launcher: FakeLauncher, project_dir: Path
+) -> None:
+    """Resume with no model of its own launches on the project's model."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.completed, message="all done"
+    )
+    await supervisor.wait_for_finish()
+
+    await supervisor.resume("carry on")
+
+    assert launcher.launches[1]["model"] == "sonnet"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("model", ["", "  \n\t "])
+async def test_resume_is_refused_for_a_blank_model(
+    supervisor: Supervisor, launcher: FakeLauncher, project_dir: Path, model: str
+) -> None:
+    """A blank model is refused, leaving the project stopped and nothing launched."""
+    result = await supervisor.initialize(project_dir, "start here")
+    await supervisor.report_lifecycle(
+        result.worker.worker_id, LifecycleState.completed, message="all done"
+    )
+    await supervisor.wait_for_finish()
+
+    with pytest.raises(SupervisorError, match="model must not be blank"):
+        await supervisor.resume("carry on", model=model)
+
+    assert supervisor.snapshot().phase == ProjectPhase.completed
+    assert len(launcher.launches) == 1
+
+
+@pytest.mark.anyio
+async def test_a_resume_breaking_the_phase_and_the_model_is_refused_for_the_phase(
+    config: BatonConfig,
+    store: StateStore,
+    tmux: FakeTmux,
+    launcher: FakeLauncher,
+    project_id: str,
+) -> None:
+    """The phase is checked before the model, so the phase is what is named."""
+    supervisor = Supervisor(
+        config=config,
+        store=store,
+        tmux=tmux,
+        launcher=launcher,
+        state=_new_state(project_id).updated(phase=ProjectPhase.running),
+    )
+
+    with pytest.raises(SupervisorError, match="can be resumed"):
+        await supervisor.resume("carry on", model="")
+
+    assert launcher.launches == []
 
 
 @pytest.mark.anyio

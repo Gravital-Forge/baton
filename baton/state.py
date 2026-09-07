@@ -149,16 +149,18 @@ def _decode_report(raw: Mapping[str, object] | None) -> LifecycleReport | None:
         message=raw["message"],
         next_prompt=raw["next_prompt"],
         delay_seconds=raw.get("delay_seconds"),
+        model=raw.get("model"),
     )
 
 
 def _decode_state(raw: Mapping[str, object]) -> ProjectState:
     """Decode a ProjectState from its JSON mapping.
 
-    ``resume_at`` and the report's ``delay_seconds`` are read leniently,
-    where every other field is read strictly: a state.json that predates
-    the handoff delay carries neither key, and None is the right reading
-    of such a file rather than a shape error.
+    ``resume_at``, the report's ``delay_seconds``, and the report's
+    ``model`` are read leniently, where every other field is read
+    strictly: a state.json written before the handoff delay or before
+    the model override carries no such key, and None is the right
+    reading of one rather than a shape error.
 
     Args:
         raw: The decoded JSON mapping for a state.json file.

@@ -89,19 +89,24 @@ class LifecycleReport:
             worker, before it launches the next one. Allowed only on
             ``success``, where it must be a whole, non-negative number.
             None or 0 launches the next worker at once.
+        model: The model the next worker runs on. Allowed only on
+            ``success``, where it must not be blank. None leaves the
+            project's model governing.
     """
 
     state: LifecycleState
     message: str | None = None
     next_prompt: str | None = None
     delay_seconds: int | None = None
+    model: str | None = None
 
     def __post_init__(self) -> None:
         """Validate the payload against this report's state.
 
         Raises:
-            ValueError: If the message, the next prompt, or the delay
-                breaks the payload rule for this report's state.
+            ValueError: If the message, the next prompt, the delay, or
+                the model breaks the payload rule for this report's
+                state.
         """
         message_required = self.state != LifecycleState.running
         if message_required and _is_blank(self.message):
@@ -134,6 +139,17 @@ class LifecycleReport:
                     f"got {self.delay_seconds!r}"
                 )
 
+        if self.model is not None:
+            if self.state != LifecycleState.success:
+                raise ValueError(
+                    f"a {self.state.value!r} report forbids a model, got {self.model!r}"
+                )
+            if _is_blank(self.model):
+                raise ValueError(f"model must not be blank, got {self.model!r}")
+            # The stored model is both persisted and passed to --model, so it
+            # is normalized here rather than at the launch.
+            object.__setattr__(self, "model", self.model.strip())
+
     @property
     def is_terminal(self) -> bool:
         """Whether this report ends the worker's run.
@@ -152,14 +168,15 @@ class LifecycleReport:
 
         Returns:
             A mapping of the state as the enum's value string, the
-            message, the next prompt, and the delay in seconds, each
-            None preserved.
+            message, the next prompt, the delay in seconds, and the
+            model, each None preserved.
         """
         return {
             "state": self.state.value,
             "message": self.message,
             "next_prompt": self.next_prompt,
             "delay_seconds": self.delay_seconds,
+            "model": self.model,
         }
 
 
@@ -215,8 +232,8 @@ class ProjectState:
             active.
         last_report: The most recent lifecycle report, or None before one
             has arrived.
-        model: The model every worker of this project runs on, or None
-            before initialization.
+        model: The project's default model, which a worker runs on when
+            nothing overrides it, or None before initialization.
         recovery_attempts: The number of diagnosis workers launched since
             the last success report.
         resume_at: The moment a pending hold ends and the next worker

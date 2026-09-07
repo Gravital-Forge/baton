@@ -118,8 +118,9 @@ class Supervisor:
         Args:
             project_path: The project directory to supervise.
             initial_prompt: The prompt the first worker is launched with.
-            model: The model every worker of this project runs on, or
-                None to use the daemon's configured default (`BATON_MODEL`).
+            model: The project's default model, which a worker runs on
+                when nothing overrides it, or None to use the daemon's
+                configured default (`BATON_MODEL`).
 
         Returns:
             The committed ProjectState, in phase running.
@@ -170,7 +171,7 @@ class Supervisor:
             )
             return self._state
 
-    async def resume(self, prompt: str) -> ProjectState:
+    async def resume(self, prompt: str, model: str | None = None) -> ProjectState:
         """Carry a stopped project on with a fresh worker.
 
         The project keeps its id, title, session name, path, model and
@@ -178,15 +179,22 @@ class Supervisor:
         and the last report is cleared, so a stopped worker's outcome is
         not read back as though it were the new worker's.
 
+        A model given here governs the resumed worker alone. The
+        project's own model is left as it was, so the worker after this
+        one runs on it again unless that worker's report names another.
+
         Args:
             prompt: The task the new worker is launched with.
+            model: The model the resumed worker runs on, for that worker
+                alone, or None to run it on the project's model.
 
         Returns:
             The committed ProjectState, in phase running.
 
         Raises:
             SupervisorError: If the project has not stopped — any phase
-                but completed or failed — or if prompt is blank.
+                but completed or failed — or if prompt or a given model
+                is blank.
             TmuxError: If creating the session or launching the worker
                 fails.
         """
@@ -199,12 +207,14 @@ class Supervisor:
                 )
             if prompt.strip() == "":
                 raise SupervisorError(f"prompt must not be blank, got {prompt!r}")
+            if model is not None and model.strip() == "":
+                raise SupervisorError(f"model must not be blank, got {model!r}")
 
             record = self._launch_worker(
                 self._state.project_path,
                 self._state.session_name,
                 prompt,
-                self._state.model,
+                model.strip() if model is not None else self._state.model,
             )
             self._commit(
                 self._state.updated(
@@ -310,6 +320,7 @@ class Supervisor:
         message: str | None = None,
         next_prompt: str | None = None,
         delay_seconds: int | None = None,
+        model: str | None = None,
     ) -> None:
         """Record a worker's lifecycle report and route on it.
 
@@ -327,10 +338,14 @@ class Supervisor:
             delay_seconds: How long the handoff holds after this worker
                 is terminated, allowed only with success. None or 0
                 launches the next worker at once.
+            model: The model the next worker runs on, allowed only with
+                success and applying to that worker alone. None leaves
+                the project's model governing.
 
         Raises:
             SupervisorError: If the report's payload breaks its state's
-                rule, if delay_seconds exceeds the configured maximum,
+                rule, if a model is blank or is given with any state but
+                success, if delay_seconds exceeds the configured maximum,
                 if worker_id is not the current worker's id, or if the
                 project is already terminating.
         """
@@ -340,6 +355,7 @@ class Supervisor:
                 message=message,
                 next_prompt=next_prompt,
                 delay_seconds=delay_seconds,
+                model=model,
             )
         except ValueError as exc:
             raise SupervisorError(str(exc)) from exc
@@ -621,7 +637,11 @@ class Supervisor:
         self._store.append_event(
             EventKind.launch,
             record.worker_id,
-            {"prompt_path": str(record.prompt_path), "pane_target": pane_target},
+            {
+                "prompt_path": str(record.prompt_path),
+                "pane_target": pane_target,
+                "model": model,
+            },
         )
         return record
 
@@ -867,7 +887,7 @@ class Supervisor:
                 self._state.project_path,
                 self._state.session_name,
                 report.next_prompt,
-                self._state.model,
+                report.model if report.model is not None else self._state.model,
             )
             self._commit(
                 self._state.updated(

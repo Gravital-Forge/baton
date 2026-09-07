@@ -21,7 +21,7 @@ TERMINAL_MESSAGE_REQUIRED_STATES = [
     LifecycleState.blocked,
 ]
 
-DELAY_FORBIDDEN_STATES = [
+NON_SUCCESS_STATES = [
     LifecycleState.running,
     LifecycleState.completed,
     LifecycleState.failed,
@@ -296,7 +296,7 @@ def test_success_report_rejects_a_delay_that_is_not_a_whole_number(
     _assert_names_value_and_rule(excinfo, delay_seconds, "a whole number of seconds")
 
 
-@pytest.mark.parametrize("state", DELAY_FORBIDDEN_STATES)
+@pytest.mark.parametrize("state", NON_SUCCESS_STATES)
 def test_only_a_success_report_may_carry_a_delay(state: LifecycleState) -> None:
     """Every state but success forbids a delay."""
     with pytest.raises(ValueError) as excinfo:
@@ -318,6 +318,77 @@ def test_report_checks_the_message_before_the_delay() -> None:
     assert "forbids a delay" not in str(excinfo.value)
 
 
+def test_success_report_accepts_a_model() -> None:
+    """A success report accepts a model for the next worker."""
+    report = LifecycleReport(
+        state=LifecycleState.success,
+        message="done",
+        next_prompt="next",
+        model="opus",
+    )
+
+    assert report.model == "opus"
+
+
+def test_success_report_stores_a_model_stripped() -> None:
+    """A success report stores its model without surrounding whitespace."""
+    report = LifecycleReport(
+        state=LifecycleState.success,
+        message="done",
+        next_prompt="next",
+        model="  opus  ",
+    )
+
+    assert report.model == "opus"
+
+
+def test_success_report_without_a_model_leaves_it_none() -> None:
+    """A success report that names no model leaves model as None."""
+    report = LifecycleReport(
+        state=LifecycleState.success, message="done", next_prompt="next"
+    )
+
+    assert report.model is None
+
+
+@pytest.mark.parametrize("model", ["", "   ", "\t\n"])
+def test_success_report_rejects_a_blank_model(model: str) -> None:
+    """A success report refuses a model that is present but blank."""
+    with pytest.raises(ValueError) as excinfo:
+        LifecycleReport(
+            state=LifecycleState.success,
+            message="done",
+            next_prompt="next",
+            model=model,
+        )
+
+    _assert_names_value_and_rule(excinfo, model, "model must not be blank")
+
+
+@pytest.mark.parametrize("state", NON_SUCCESS_STATES)
+def test_only_a_success_report_may_carry_a_model(state: LifecycleState) -> None:
+    """Every state but success forbids a model."""
+    with pytest.raises(ValueError) as excinfo:
+        LifecycleReport(state=state, message="the reason", model="opus")
+
+    _assert_names_value_and_rule(excinfo, "opus", "forbids a model")
+
+
+def test_report_checks_the_delay_before_the_model() -> None:
+    """When both the delay and the model are wrong, the delay wins."""
+    with pytest.raises(ValueError) as excinfo:
+        LifecycleReport(
+            state=LifecycleState.success,
+            message="done",
+            next_prompt="next",
+            delay_seconds=-1,
+            model="",
+        )
+
+    _assert_names_value_and_rule(excinfo, -1, "a whole number of seconds")
+    assert "model must not be blank" not in str(excinfo.value)
+
+
 @pytest.mark.parametrize(
     ("state", "expected"),
     [
@@ -336,12 +407,13 @@ def test_is_terminal_matches_the_state(state: LifecycleState, expected: bool) ->
 
 
 def test_lifecycle_report_to_dict_maps_every_field() -> None:
-    """to_dict maps a report to its state value, message, prompt, and delay."""
+    """to_dict maps a report to its state, message, prompt, delay, and model."""
     report = LifecycleReport(
         state=LifecycleState.success,
         message="done",
         next_prompt="next",
         delay_seconds=90,
+        model="opus",
     )
 
     assert report.to_dict() == {
@@ -349,11 +421,12 @@ def test_lifecycle_report_to_dict_maps_every_field() -> None:
         "message": "done",
         "next_prompt": "next",
         "delay_seconds": 90,
+        "model": "opus",
     }
 
 
 def test_lifecycle_report_to_dict_preserves_absent_fields_as_none() -> None:
-    """to_dict keeps an absent message, next prompt, and delay as None."""
+    """to_dict keeps an absent message, next prompt, delay, and model as None."""
     report = LifecycleReport(state=LifecycleState.running)
 
     assert report.to_dict() == {
@@ -361,6 +434,7 @@ def test_lifecycle_report_to_dict_preserves_absent_fields_as_none() -> None:
         "message": None,
         "next_prompt": None,
         "delay_seconds": None,
+        "model": None,
     }
 
 
@@ -518,6 +592,7 @@ def test_project_state_to_dict_maps_every_field(tmp_path: Path) -> None:
             message="done",
             next_prompt="next",
             delay_seconds=120,
+            model="opus",
         ),
         model="sonnet",
         recovery_attempts=2,
@@ -543,6 +618,7 @@ def test_project_state_to_dict_maps_every_field(tmp_path: Path) -> None:
             "message": "done",
             "next_prompt": "next",
             "delay_seconds": 120,
+            "model": "opus",
         },
         "model": "sonnet",
         "recovery_attempts": 2,

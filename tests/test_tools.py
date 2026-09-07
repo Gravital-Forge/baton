@@ -300,6 +300,7 @@ async def test_report_lifecycle_converts_state_and_delegates_every_argument(
         message="task done",
         next_prompt="do the next thing",
         delay_seconds=90,
+        model="fable",
     )
 
     assert stub.supervisor_for_worker_calls == ["worker-1"]
@@ -310,6 +311,7 @@ async def test_report_lifecycle_converts_state_and_delegates_every_argument(
             "message": "task done",
             "next_prompt": "do the next thing",
             "delay_seconds": 90,
+            "model": "fable",
         }
     ]
 
@@ -336,6 +338,30 @@ async def test_report_lifecycle_omits_the_delay_by_default(
     )
 
     assert supervisor.report_lifecycle_calls[0]["delay_seconds"] is None
+
+
+@pytest.mark.anyio
+async def test_report_lifecycle_omits_the_model_by_default(
+    make_stub_coordinator: type[StubCoordinator],
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """A report naming no model reaches the supervisor with None.
+
+    None is what leaves the project's model governing the next worker, so
+    the tool must invent no value of its own here.
+    """
+    supervisor = make_stub_supervisor()
+    stub = make_stub_coordinator(supervisor=supervisor)
+    tools = BatonTools(stub)
+
+    await tools.report_lifecycle(
+        worker_id="worker-1",
+        state="success",
+        message="task done",
+        next_prompt="do the next thing",
+    )
+
+    assert supervisor.report_lifecycle_calls[0]["model"] is None
 
 
 @pytest.mark.anyio
@@ -449,6 +475,34 @@ async def test_report_lifecycle_leaves_the_delay_cap_to_the_supervisor(
 
 
 @pytest.mark.anyio
+async def test_report_lifecycle_leaves_a_blank_model_to_the_supervisor(
+    make_stub_coordinator: type[StubCoordinator],
+    make_stub_supervisor: type[StubSupervisor],
+) -> None:
+    """A blank model reaches the supervisor, whose refusal comes back whole.
+
+    The tool holds no set of legal model names and checks nothing of its
+    own: what a model may be is the supervisor's to refuse.
+    """
+    supervisor = make_stub_supervisor(
+        report_lifecycle_error=SupervisorError("model must not be blank, got '  '"),
+    )
+    stub = make_stub_coordinator(supervisor=supervisor)
+    tools = BatonTools(stub)
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.report_lifecycle(
+            worker_id="worker-1",
+            state="success",
+            message="done",
+            next_prompt="next task",
+            model="  ",
+        )
+
+    assert str(excinfo.value) == "model must not be blank, got '  '"
+
+
+@pytest.mark.anyio
 async def test_report_lifecycle_from_an_unrouted_worker_is_refused(
     make_stub_coordinator: type[StubCoordinator],
 ) -> None:
@@ -515,6 +569,7 @@ async def test_get_project_status_returns_phase_worker_last_report_and_events(
             "message": "done",
             "next_prompt": "next task",
             "delay_seconds": None,
+            "model": None,
         },
         "events": [
             {
@@ -648,16 +703,35 @@ async def test_list_projects_with_no_project_returns_an_empty_projects_list(
 
 
 @pytest.mark.anyio
-async def test_resume_project_delegates_the_project_id_and_prompt(
+async def test_resume_project_delegates_every_argument(
     make_stub_coordinator: type[StubCoordinator],
 ) -> None:
-    """resume_project delegates the project id and the prompt."""
+    """resume_project delegates the project id, the prompt and the model."""
+    stub = make_stub_coordinator()
+    tools = BatonTools(stub)
+
+    await tools.resume_project(project_id="a1b2c3d4", prompt="carry on", model="fable")
+
+    assert stub.resume_calls == [
+        {"project_id": "a1b2c3d4", "prompt": "carry on", "model": "fable"}
+    ]
+
+
+@pytest.mark.anyio
+async def test_resume_project_omits_the_model_by_default(
+    make_stub_coordinator: type[StubCoordinator],
+) -> None:
+    """A resume naming no model reaches the coordinator with None.
+
+    None is what leaves the project's model governing the resumed worker,
+    so the tool must invent no value of its own here.
+    """
     stub = make_stub_coordinator()
     tools = BatonTools(stub)
 
     await tools.resume_project(project_id="a1b2c3d4", prompt="carry on")
 
-    assert stub.resume_calls == [{"project_id": "a1b2c3d4", "prompt": "carry on"}]
+    assert stub.resume_calls[0]["model"] is None
 
 
 @pytest.mark.anyio
@@ -712,6 +786,22 @@ async def test_resume_project_surfaces_a_supervisor_error_as_a_tool_error(
     assert str(excinfo.value) == (
         "only a project in phase 'completed' or 'failed' can be resumed, got 'running'"
     )
+
+
+@pytest.mark.anyio
+async def test_resume_project_surfaces_a_blank_model_as_a_tool_error(
+    make_stub_coordinator: type[StubCoordinator],
+) -> None:
+    """resume_project surfaces a refused model as an identical ToolError."""
+    stub = make_stub_coordinator(
+        resume_error=SupervisorError("model must not be blank, got '  '"),
+    )
+    tools = BatonTools(stub)
+
+    with pytest.raises(ToolError) as excinfo:
+        await tools.resume_project(project_id="a1b2c3d4", prompt="carry on", model="  ")
+
+    assert str(excinfo.value) == "model must not be blank, got '  '"
 
 
 @pytest.mark.anyio
