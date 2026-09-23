@@ -8,7 +8,7 @@ requires-python = ">=3.12"
 dependencies = [
     "mcp[cli]>=2.2.0,<3",
     "starlette>=1.6.0,<2.0.0",
-    "uvicorn>=0.52.4,<0.53.0",
+    "uvicorn>=0.53.0,<0.54.0",
 ]
 
 [dependency-groups]
