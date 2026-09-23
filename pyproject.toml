@@ -13,7 +13,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "coverage>=7.15.1,<8.0.0",
+    "coverage>=7.16.1,<8.0.0",
     "pytest>=9.1.1,<10.0.0",
     "ruff>=0.16.7,<0.17.0",
     "rumdl>=0.2.73,<0.3.0",
