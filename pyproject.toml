@@ -7,7 +7,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "mcp[cli]>=2.2.0,<3",
-    "starlette>=1.6.0,<2.0.0",
+    "starlette>=1.7.0,<2.0.0",
     "uvicorn>=0.53.0,<0.54.0",
 ]
 
